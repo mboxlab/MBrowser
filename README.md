@@ -5,6 +5,13 @@
 страницы рисует системный движок **WebView2** — тот же Chromium, что в Edge. Он уже есть в
 Windows 10/11, поэтому сайты работают так же, как в Chrome/Edge.
 
+## Установка
+
+Скачайте **[MBrowser-Setup.exe](https://github.com/mboxlab/MBrowser/releases/latest/download/MBrowser-Setup.exe)**
+(все версии — на странице [Releases](https://github.com/mboxlab/MBrowser/releases)) и запустите.
+Права администратора не нужны. Установщик не подписан, поэтому Windows может показать
+«Система Windows защитила ваш компьютер» — нажмите «Подробнее» → «Выполнить в любом случае».
+
 ## Почему быстро
 
 - **Вкладки засыпают.** При запуске восстановленные вкладки не грузятся — только активная.
@@ -111,6 +118,16 @@ cargo build --release
 `mbrowser.exe https://example.com` открывает ссылку в новой вкладке.
 Внутреннее короткое имя — `mbrowser` (M — Meteor): так называются exe, папки с данными и
 переменные окружения.
+
+Установщик собирается [Inno Setup 6](https://jrsoftware.org/isinfo.php) из
+`installer\mbrowser.iss` (`iscc /DAppVersion=0.1.0 installer\mbrowser.iss` → `dist\MBrowser-Setup.exe`).
+Он ставит exe туда же, куда пункт меню «Установить…», и пишет те же ключи `HKCU`, так что они
+друг другу не мешают.
+
+Релиз: поднять `version` в `Cargo.toml`, закоммитить и запушить тег `v<версия>`
+(`git tag v0.2.0 && git push origin v0.2.0`). GitHub Actions (`.github/workflows/release.yml`)
+соберёт браузер и установщик, проверит установку и удаление и опубликует релиз с
+`MBrowser-Setup.exe` и `mbrowser.exe`. Текст релиза — `installer\release-notes.md`.
 
 Иконка (`assets\mbrowser.ico`, плюс PNG 256/512/1024) рисуется скриптом
 `python tools\make_icon.py` (нужны numpy и Pillow); `build.rs` вшивает её в exe.
