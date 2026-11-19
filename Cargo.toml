@@ -1,6 +1,6 @@
 [package]
 name = "mbrowser"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Meteor Browser: fast, lightweight Rust browser shell over the system WebView2 (Chromium) engine"
 
