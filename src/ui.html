@@ -1,0 +1,1789 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Meteor Browser UI</title>
+<style>
+:root{
+  --sp:#58b4f0;
+  --strip:color-mix(in srgb,#17181c 90%,var(--sp)); --bar:color-mix(in srgb,#25262c 94%,var(--sp));
+  --hover:color-mix(in srgb,#202127 88%,var(--sp));
+  --fg:#e8e8ec; --mut:#9a9ca6; --dim:#6c6e78;
+  --field:#17181c; --drop:#1f2026; --sel:color-mix(in srgb,#2a2c36 80%,var(--sp)); --acc:var(--sp);
+  --priv:#b58cff; --warn:#f0a35e; --ok:#6fd39b;
+}
+body.private{ --bar:#2a2240; --field:#1b1528; --drop:#221b33; --sel:#382c55; --acc:#b58cff; }
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;height:100%;background:var(--strip);color:var(--fg);overflow:hidden;transition:background-color .25s;
+  font:12.5px "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;user-select:none;-webkit-user-select:none}
+svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+button{all:unset;display:grid;place-items:center;cursor:default}
+
+/* ---------- tab strip = title bar ---------- */
+#strip{position:relative;height:40px;display:flex;align-items:flex-end;padding-left:6px}
+/* spaces: one chip per space (tab count badge + name), then a chevron for the panel */
+#spaces{display:flex;align-items:center;gap:2px;flex:none;height:28px;margin-bottom:3px}
+.chip{display:flex;align-items:center;gap:6px;height:28px;padding:0 9px 0 5px;border-radius:8px;color:var(--mut);
+  max-width:150px;font-size:12.5px;transition:background .12s,color .12s}
+.chip.only{padding:0 5px}
+.chip:hover{background:var(--hover);color:var(--fg)}
+.chip.cur{background:#ffffff14;color:var(--fg)}
+.chip.drop-target{box-shadow:inset 0 0 0 1.5px var(--c)}
+.cnt{min-width:18px;height:18px;padding:0 4px;border-radius:5px;flex:none;display:grid;place-items:center;
+  font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;color:#fff;background:color-mix(in srgb,var(--c) 32%,#2c2d34)}
+/* Segoe's digits sit ~0.06em below the line box centre: trim the box to the
+   digits themselves (cap height .. baseline), then the grid centres them */
+.cnt:not(.ic){display:block;text-align:center;text-box:trim-both cap alphabetic;padding-block:calc((18px - 1cap) / 2)}
+.srow .cnt:not(.ic){padding-block:calc((22px - 1cap) / 2)}
+#shield.on.count #badge{display:block;text-align:center;text-box:trim-both cap alphabetic;line-height:normal;padding-block:calc((15px - 1cap) / 2)}
+.chip.cur .cnt{background:var(--c);color:#121318}
+.cnm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#spmore{width:24px;height:28px;margin:0 6px 3px 0;border-radius:7px;color:var(--mut);flex:none}
+#spmore:hover,#spmore.on{background:var(--hover);color:var(--fg)}
+#spmore svg{width:14px;height:14px;transition:transform .2s ease}
+#spmore.on svg{transform:rotate(180deg)}
+#tabs{display:flex;align-items:flex-end;height:100%;min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;padding-top:6px}
+#tabs::-webkit-scrollbar{display:none}
+.tab{position:relative;height:34px;flex:0 1 224px;width:224px;min-width:44px;display:flex;align-items:center;gap:8px;
+  padding:0 8px 0 11px;border-radius:9px 9px 0 0;color:var(--mut);transition:background .12s,color .12s}
+.tab:hover{background:var(--hover);color:var(--fg)}
+.tab.active{background:var(--bar);color:var(--fg)}
+.tab+.tab:not(.active):not(:hover)::before{content:"";position:absolute;left:0;top:9px;bottom:9px;width:1px;background:#ffffff14}
+.tab.active+.tab::before,.tab:hover+.tab::before{display:none}
+.tab.pinned{flex:0 0 44px;width:44px;padding:0;justify-content:center}
+.tab.pinned .ttl,.tab.pinned .x{display:none}
+.fav{position:relative;width:16px;height:16px;flex:none;display:grid;place-items:center}
+.fav img{width:16px;height:16px;border-radius:3px}
+.fav .l{width:16px;height:16px;border-radius:4px;background:#ffffff1a;color:var(--fg);font-size:10px;font-weight:700;display:grid;place-items:center}
+.fav .l.ic{background:none;color:var(--mut)}
+.fav .l.ic svg{width:15px;height:15px}
+.tab.active .fav .l.ic{color:var(--acc)}
+.tab.loading .fav>*{visibility:hidden}
+.tab.loading .fav::after{content:"";position:absolute;inset:1px;border:2px solid var(--acc);border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.tab.private .fav::before{content:"";position:absolute;right:-3px;bottom:-3px;width:7px;height:7px;border-radius:50%;background:var(--priv);border:2px solid var(--strip)}
+.ttl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;mask-image:linear-gradient(90deg,#000 calc(100% - 18px),transparent)}
+.snd{display:none;width:20px;height:20px;border-radius:5px;color:var(--mut)}
+.snd svg{width:14px;height:14px}
+.tab.audio .snd,.tab.muted .snd{display:grid}
+.tab.muted .snd{color:var(--warn)}
+.snd:hover{background:#ffffff14;color:var(--fg)}
+.x{width:20px;height:20px;border-radius:5px;opacity:0;flex:none}
+.x svg{width:12px;height:12px;stroke-width:2.4}
+.tab:hover .x,.tab.active .x{opacity:.75}
+.x:hover{background:#ffffff1f;opacity:1!important}
+.tab.narrow:not(.active) .x{display:none}
+.tab.drag-over-l{box-shadow:inset 2px 0 0 var(--acc)}
+.tab.drag-over-r{box-shadow:inset -2px 0 0 var(--acc)}
+#plus{width:30px;height:30px;margin:0 0 2px 4px;border-radius:8px;color:var(--mut);flex:none;transition:background .12s,color .12s}
+#plus:hover,#plus.on{background:var(--hover);color:var(--fg)}
+#plus svg{transition:transform .22s cubic-bezier(.3,.7,.4,1)}
+#plus.on svg{transform:rotate(45deg)}
+#drag{flex:1;min-width:48px;align-self:stretch}
+#wc{display:flex;align-self:stretch;flex:none}
+#wc button{width:46px;height:100%;color:var(--fg);font:10px "Segoe Fluent Icons","Segoe MDL2 Assets";transition:background .1s}
+#wc button:hover{background:#ffffff14}
+#wc #wclose:hover{background:#c42b1c;color:#fff}
+.rz{position:absolute;top:0;height:5px;z-index:5}
+.rz.n{left:10px;right:10px;cursor:n-resize}
+.rz.nw{left:0;width:10px;cursor:nw-resize}
+.rz.ne{right:0;width:10px;cursor:ne-resize}
+body.max .rz{display:none}
+
+/* ---------- toolbar ---------- */
+#bar{height:42px;background:var(--bar);display:flex;align-items:center;gap:2px;padding:0 6px;border-bottom:1px solid #0000004d;transition:background-color .25s}
+.btn{width:32px;height:32px;border-radius:50%;color:var(--fg);transition:background .1s}
+.btn:hover{background:#ffffff14}
+.btn:active{background:#ffffff22}
+.btn.off{color:var(--dim);pointer-events:none}
+#omni{flex:1;min-width:0;height:32px;margin:0 6px;border-radius:16px;background:var(--field);display:flex;align-items:center;
+  padding:0 4px 0 12px;gap:8px;border:1px solid transparent;transition:border-color .12s,background .12s}
+#omni:hover{background:color-mix(in srgb,var(--field) 80%,#fff 4%)}
+#omni.focus{border-color:var(--acc);background:var(--field)}
+#sec{color:var(--mut);display:grid;place-items:center}
+#sec svg{width:14px;height:14px}
+#sec.warn{color:var(--warn)}
+#sec.priv{color:var(--priv)}
+#ubox{position:relative;flex:1;min-width:0;height:100%}
+#uview{position:absolute;inset:0;display:flex;align-items:center;gap:12px;pointer-events:none;font-size:14px;white-space:nowrap;overflow:hidden}
+#uview .dom{color:var(--fg);flex:none}
+#uview .ttl{color:var(--mut);min-width:0;overflow:hidden;text-overflow:ellipsis}
+#omni.focus #uview{display:none}
+#omni:not(.focus) #url.viewing{color:transparent}
+#url{all:unset;width:100%;min-width:0;height:100%;font-size:14px;color:var(--fg);user-select:text;-webkit-user-select:text}
+#url::placeholder{color:var(--dim)}
+#url::selection{background:color-mix(in srgb,var(--acc) 45%,transparent)}
+#star{width:26px;height:26px;border-radius:50%;color:var(--mut)}
+#star:hover{background:#ffffff14;color:var(--fg)}
+#star.on{color:#ffcf5c}
+#star.on svg{fill:#ffcf5c}
+#star.hide{display:none}
+#tr{width:26px;height:26px;border-radius:50%;color:var(--mut)}
+#tr:hover{background:#ffffff14;color:var(--fg)}
+#tr.on{color:var(--acc)}
+#tr.hide{display:none}
+#tr svg{width:17px;height:17px}
+#shield{position:relative}
+#shield.on{color:var(--ok)}
+/* Off on this site: a crossed-out shield, unmistakable from "nothing blocked yet".
+   Not `.off`: `.btn.off` is a disabled button and takes no clicks, and this one
+   must stay clickable to switch protection back on. */
+#shield.paused{color:var(--dim)}
+#shield .slash{display:none}
+#shield.paused .slash{display:inline}
+#shield.hide{visibility:hidden}
+#badge{position:absolute;right:0;top:2px;min-width:15px;height:15px;padding:0 3px;border-radius:8px;background:var(--ok);color:#0d1f15;
+  font-size:9.5px;font-weight:700;display:none;place-items:center;line-height:15px}
+#shield.on.count #badge{display:grid}
+
+/* ---------- suggestion rows ---------- */
+#drop{position:absolute;left:0;right:0;top:82px;z-index:45;background:var(--drop);border-bottom:1px solid #ffffff12;padding:4px 0 6px;display:none;
+  box-shadow:0 12px 32px #0007}
+#drop.open{display:block}
+/* page snapshot under the dropdown (the real page is beneath this webview) */
+#dback{position:fixed;left:0;right:0;top:82px;bottom:0;z-index:20;background:#0c0d10 0 0/100% 100% no-repeat}
+#dback::after{content:"";position:absolute;inset:0;background:#0a0b0f;opacity:0;transition:opacity .2s ease}
+#dback.shown::after{opacity:.35}
+.row{height:36px;display:flex;align-items:center;gap:12px;padding:0 16px;margin:0 6px;border-radius:8px;color:var(--fg);font-size:13.5px}
+.row.sel{background:var(--sel)}
+.row svg{color:var(--mut)}
+.row .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:55%}
+.row .u{padding-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--mut);flex:1;min-width:0;font-size:12.5px}
+.row .tag{flex:none;font-size:11.5px;color:var(--acc);padding:2px 8px;border-radius:10px;background:color-mix(in srgb,var(--acc) 16%,transparent)}
+
+/* ---------- panels over the blurred page ---------- */
+#panel{position:fixed;left:0;right:0;top:82px;bottom:0;z-index:40;overflow:hidden;background:#0c0d10}
+#pbg{position:absolute;inset:0;background:0 0/100% 100% no-repeat;transform-origin:50% 35%;
+  transition:filter .26s ease,transform .26s ease}
+#panel.shown #pbg{filter:blur(18px) saturate(1.15);transform:scale(1.04)}
+#pscrim{position:absolute;inset:0;background:#0a0b0fb0;opacity:0;transition:opacity .26s ease}
+#panel.shown #pscrim{opacity:1}
+.card{position:relative;padding:8px;border-radius:18px;background:color-mix(in srgb,var(--drop) 92%,transparent);
+  border:1px solid #ffffff17;box-shadow:0 30px 80px #000b;
+  opacity:0;transform:translateY(-8px) scale(.985);transition:opacity .18s ease,transform .2s cubic-bezier(.3,.7,.4,1)}
+#panel.shown .card{opacity:1;transform:none}
+/* Tablo: the user's site tiles (white cards, like Yandex) */
+#tcard{width:min(1020px,calc(100% - 48px));margin:7vh auto 0;padding:0;background:transparent;border:0;box-shadow:none}
+#panel.home{background:color-mix(in srgb,#111216 93%,var(--sp))}
+#panel.home #pbg,#panel.home #pscrim{display:none}
+#panel.home #tcard{margin-top:10vh}
+#tgrid{--tw:240px;display:grid;grid-template-columns:repeat(auto-fit,var(--tw));justify-content:center;gap:10px}
+.tile{position:relative;height:146px;border-radius:14px;background:#fff;color:#1d1d22;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:14px;cursor:default;transition:transform .12s ease,box-shadow .12s ease}
+.tile:hover{transform:translateY(-2px);box-shadow:0 10px 26px #0006}
+.tile.over{box-shadow:0 0 0 3px var(--acc)}
+.tic{width:64px;height:64px;display:grid;place-items:center;border-radius:16px;background:#f0f1f4;color:#4a4c57;
+  font:600 26px "Segoe UI",sans-serif;overflow:hidden}
+.tic:has(img){background:none}
+.tic img{width:64px;height:64px;object-fit:contain;border-radius:14px}
+.tic img.small{width:32px;height:32px;border-radius:6px}
+.tnm{font-size:15px;max-width:calc(100% - 24px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tdots{position:absolute;top:8px;right:8px;width:26px;height:26px;border-radius:7px;background:#00000014;color:#3c3d44;opacity:0;transition:opacity .1s}
+.tdots svg{width:16px;height:16px;fill:currentColor;stroke:none}
+.tile:hover .tdots{opacity:1}
+.tdots:hover{background:#00000026}
+#tform{margin:16px auto 0;padding:14px;border-radius:16px;background:#1d1e24f2;border:1px solid #ffffff14;box-shadow:0 20px 50px #0009}
+.tfrow{display:flex;gap:8px;align-items:center}
+.tfrow input{all:unset;flex:1;min-width:0;height:40px;padding:0 14px;border-radius:10px;background:#ffffff0f;color:var(--fg);font-size:14px;
+  user-select:text;-webkit-user-select:text;box-shadow:inset 0 0 0 1px #ffffff14}
+.tfrow input:focus{box-shadow:inset 0 0 0 1px var(--acc)}
+.tfrow input::placeholder{color:var(--dim)}
+.tbtn{height:40px;padding:0 14px;border-radius:10px;background:#ffffff12;color:var(--fg);font-size:13px;white-space:nowrap}
+.tbtn:hover{background:#ffffff1f}
+.tbtn.pri{background:var(--acc);color:#121318;font-weight:600}
+.tbtn.pri:hover{filter:brightness(1.1)}
+#ttabs{display:flex;gap:16px;margin:16px 4px 10px}
+#ttabs button{font-size:14px;color:var(--mut)}
+#ttabs button.on{color:var(--fg)}
+#tsugg{display:flex;flex-wrap:wrap;gap:8px}
+.tsg{display:flex;align-items:center;gap:9px;height:40px;padding:0 14px 0 8px;border-radius:10px;background:#ffffff0b;font-size:13.5px;color:var(--fg)}
+.tsg:hover{background:#ffffff17}
+.tsg .tic{width:24px;height:24px;border-radius:6px;font-size:12px;background:#ffffff14;color:var(--fg)}
+.tsg .tic img,.tsg .tic img.small{width:20px;height:20px;border-radius:4px}
+.tempty{color:var(--dim);font-size:13px;padding:8px 4px}
+.lsec{font-size:11px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.07em;margin:14px 12px 6px}
+
+#scard{position:absolute;left:8px;top:6px;width:300px;max-width:calc(100% - 16px);padding:6px}
+#scard .lsec{margin:8px 10px 6px}
+.srow{height:40px;display:flex;align-items:center;gap:11px;padding:0 4px 0 9px;border-radius:9px;font-size:13.5px}
+.srow:hover{background:#ffffff0c}
+.srow.cur{background:#ffffff12}
+.srow .cnt{min-width:22px;height:22px;border-radius:6px;font-size:11.5px}
+.srow.cur .cnt{background:var(--c);color:#121318}
+.srow .snm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sdots{width:28px;height:28px;border-radius:7px;color:var(--mut);opacity:0;transition:opacity .1s}
+.srow:hover .sdots,.sdots.on{opacity:1}
+.sdots:hover,.sdots.on{background:#ffffff14;color:var(--fg)}
+.sdots svg{width:16px;height:16px;fill:currentColor;stroke:none}
+.srow input{all:unset;flex:1;min-width:0;height:28px;padding:0 9px;border-radius:7px;background:#ffffff10;font-size:13.5px;
+  color:var(--fg);user-select:text;-webkit-user-select:text;box-shadow:inset 0 0 0 1px var(--c)}
+.srow.add{color:var(--fg)}
+.srow.add svg{width:22px;height:22px;color:var(--mut);stroke-width:1.6}
+/* "⋮" menu of a space */
+.cnt.ic{padding:0;font:12px "Segoe UI Emoji",sans-serif;background:color-mix(in srgb,var(--c) 22%,#2c2d34)}
+.chip.cur .cnt.ic,.srow.cur .cnt.ic{background:color-mix(in srgb,var(--c) 50%,#2c2d34)}
+.srow .cnt.ic{font-size:14px}
+.srow .scnt{color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
+.mic{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;padding:4px 5px 2px}
+.mic button{height:27px;border-radius:7px;font:15px "Segoe UI Emoji",sans-serif}
+.mic button:hover{background:#ffffff12}
+.mic button.on{background:color-mix(in srgb,var(--c) 32%,transparent)}
+.mic button.num{font:700 10.5px "Segoe UI",sans-serif;color:var(--mut)}
+.pmenu{position:absolute;z-index:60;width:248px;padding:5px;border-radius:12px;background:#24252c;border:1px solid #ffffff17;
+  box-shadow:0 16px 40px #000a;animation:pop .12s ease-out}
+@keyframes pop{from{opacity:0;transform:translateY(-4px)}}
+.pmenu .mi{height:34px;display:flex;align-items:center;gap:10px;padding:0 10px;border-radius:8px;font-size:13px}
+.pmenu .mi:hover{background:#ffffff10}
+.pmenu .mi svg{width:15px;height:15px;color:var(--mut)}
+.pmenu .mi.del{color:#ff8a8a}
+.pmenu .mi.del svg{color:#ff8a8a}
+.pmenu .sep{height:1px;background:#ffffff12;margin:4px 6px}
+.msw{display:flex;gap:9px;padding:9px 10px 7px}
+.msw button{width:16px;height:16px;border-radius:50%;background:var(--c)}
+.msw button:hover{transform:scale(1.15)}
+.msw button.on{box-shadow:0 0 0 2px #24252c,0 0 0 4px var(--c)}
+
+/* hit areas reach the top screen edge (maximized: throw the mouse up and click) */
+.tab::after{content:"";position:absolute;left:0;right:0;top:-6px;height:6px}
+.chip{position:relative}
+.chip::after{content:"";position:absolute;left:0;right:0;top:-9px;height:9px}
+.chip:first-child::after{left:-6px}
+#plus{position:relative}
+#plus::after{content:"";position:absolute;left:0;right:0;top:-8px;height:8px}
+/* window controls: crisp vector glyphs (icon fonts get ClearType colour fringes) */
+#wc svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:1;stroke-linecap:butt;shape-rendering:crispEdges}
+#wclose svg{shape-rendering:geometricPrecision}
+#omni:not(.focus) #url.viewing::selection{background:transparent}
+
+/* downloads button: arrow + progress ring */
+#dlbtn{position:relative}
+#dlbtn .dlic{transition:transform .2s ease,color .2s ease}
+#dlbtn .ring{position:absolute;left:4px;top:4px;width:24px;height:24px;transform:rotate(-90deg);opacity:0;transition:opacity .2s}
+#dlbtn .ring circle{fill:none;stroke:var(--acc);stroke-width:2.6;stroke-linecap:round;transition:stroke-dashoffset .3s ease}
+#dlbtn.active .ring{opacity:1}
+#dlbtn.active .dlic{transform:scale(.7);color:var(--acc)}
+#dlbtn.indet .ring{animation:dlspin 1s linear infinite}
+@keyframes dlspin{from{transform:rotate(-90deg)}to{transform:rotate(270deg)}}
+#dlbtn.unseen{color:var(--acc)}
+
+/* plain panels (downloads): a dropdown over the page, no blur */
+#panel.plain #pbg{filter:none!important;transform:none!important}
+#panel.plain #pscrim{display:none}
+/* the chrome is clipped to the card + this shadow's reach (see sendClip) */
+#panel.plain .card{box-shadow:0 6px 14px #0009}
+#dcard.over{animation:pop .14s ease-out;background:var(--drop)}
+/* extensions: same dropdown as downloads */
+#xcard{position:absolute;right:8px;top:6px;width:390px;max-width:calc(100% - 16px);max-height:calc(100% - 20px);padding:4px 6px 8px;
+  display:flex;flex-direction:column}
+#xlist{overflow:auto;min-height:0}
+.xrow{display:flex;align-items:center;gap:12px;padding:8px 6px 8px 10px;border-radius:10px}
+.xrow:hover{background:#ffffff0c}
+.xic{width:28px;height:28px;flex:none;display:grid;place-items:center;border-radius:7px;background:#ffffff12;font-weight:700;font-size:13px}
+.xic:has(img){background:none}
+.xic img{width:24px;height:24px}
+.xrow.off .xic,.xrow.off .xname{opacity:.45}
+.xname{font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sw{width:30px;height:18px;border-radius:9px;background:#ffffff2e;position:relative;flex:none;transition:background .15s}
+.sw::after{content:"";position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .15s}
+.sw.on{background:var(--acc)}
+.sw.on::after{transform:translateX(12px)}
+.xhint{font-size:12px;color:var(--mut);padding:10px 12px 4px;line-height:1.45}
+.xrow:not(:hover) .dbtn.hov{opacity:0}
+#xbar{display:flex;align-items:center;gap:2px}
+#xbar .xa{font-size:12px;font-weight:700}
+#xbar .xa img{width:18px;height:18px;border-radius:4px;pointer-events:none}
+/* glass: this page again, transparent, in a window over the page area; Windows
+   blurs the live page under it. Only the Tablo (and suggestions) are drawn. */
+html.glass,html.glass body{background:transparent}
+html.glass #strip,html.glass #bar,html.glass #dback{display:none}
+html.glass #panel{top:0;background:transparent}
+html.glass #pbg{display:none}
+html.glass #pscrim{background:#0a0b0f8c}
+html.glass #drop{top:0}
+#dcard{position:absolute;right:8px;top:6px;width:390px;max-width:calc(100% - 16px);max-height:calc(100% - 20px);padding:4px 6px 8px;
+  display:flex;flex-direction:column}
+.dhead{display:flex;align-items:center;justify-content:space-between;padding:12px 10px 8px 12px}
+.dhead b{font-size:18px;font-weight:600}
+.dlink{color:var(--acc);font-size:13px;padding:4px 2px}
+.dlink:hover{text-decoration:underline}
+#dlist{overflow:auto;min-height:0}
+.drow{display:flex;align-items:center;gap:12px;padding:8px 6px 8px 10px;border-radius:10px}
+.drow:hover{background:#ffffff0c}
+.fic{position:relative;width:28px;height:34px;flex:none}
+.fic svg{width:28px;height:34px;stroke-width:1.3}
+.fic span{position:absolute;left:0;right:0;bottom:5px;text-align:center;font:800 7px "Segoe UI",sans-serif;color:var(--c);letter-spacing:.02em}
+.dtxt{flex:1;min-width:0}
+.dname{font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dstat{font-size:12px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.drow.gone .dname{color:var(--mut)}
+.dbar{height:3px;border-radius:2px;background:#ffffff14;margin-top:6px;overflow:hidden}
+.dbar i{display:block;height:100%;background:var(--acc);border-radius:2px;transition:width .3s ease}
+.dact{display:flex;gap:2px;flex:none}
+.dbtn{width:28px;height:28px;border-radius:7px;color:var(--mut)}
+.dbtn:hover,.dbtn.on{background:#ffffff14;color:var(--fg)}
+.dbtn svg{width:15px;height:15px}
+.drow:not(:hover) .dbtn.hov:not(.on){opacity:0}
+.dfoot{display:flex;justify-content:space-between;padding:10px 12px 4px}
+.dempty{color:var(--mut);padding:28px 12px 22px;text-align:center;font-size:13px}
+.pmenu .mi.off{opacity:.38;pointer-events:none}
+.pmenu .mi .ck{margin-left:auto;visibility:hidden;color:var(--fg)}
+.pmenu .mi.on .ck{visibility:visible}
+
+/* Tablo: edit mode, tile size and width (right click on the background) */
+#tcard[data-width="small"]{width:min(640px,calc(100% - 48px))}
+#tcard[data-width="medium"]{width:min(840px,calc(100% - 48px))}
+#tcard[data-width="large"]{width:min(1180px,calc(100% - 48px))}
+#tcard[data-size="medium"] #tgrid{--tw:200px}
+#tcard[data-size="medium"] .tile{height:124px;gap:12px}
+#tcard[data-size="medium"] .tile .tic,#tcard[data-size="medium"] .tile .tic img:not(.small){width:52px;height:52px}
+#tcard[data-size="small"] #tgrid{--tw:160px}
+#tcard[data-size="small"] .tile{height:100px;gap:9px}
+#tcard[data-size="small"] .tile .tic,#tcard[data-size="small"] .tile .tic img:not(.small){width:40px;height:40px}
+#tcard[data-size="small"] .tnm{font-size:13px}
+.tedit{position:absolute;top:8px;right:8px;display:none;gap:4px}
+.tedit button{width:26px;height:26px;border-radius:7px;background:#00000014;color:#3c3d44}
+.tedit button:hover{background:#00000026}
+.tedit svg{width:14px;height:14px}
+#tcard.editing .tedit{display:flex}
+#tcard.editing .tdots{display:none}
+#tbar{display:flex;flex-direction:column;align-items:center;gap:16px;margin-top:22px}
+#taddbtn{display:flex;flex-direction:column;align-items:center;gap:6px;color:var(--fg);font-size:13px}
+#taddbtn svg{width:30px;height:30px;stroke-width:1.5}
+#taddbtn:hover svg{color:var(--acc)}
+#tdone{padding:7px 16px;border-radius:9px;background:#ffffff14;font-size:13px;color:var(--fg)}
+#tdone:hover{background:#ffffff22}
+.mi.sub{position:relative}
+.mi.sub .chev{margin-left:auto;color:var(--mut)}
+.mi.sub>.subm{display:none;position:absolute;left:100%;top:-6px;width:250px}
+.mi.sub:hover>.subm{display:block}
+</style>
+</head>
+<body>
+<div id="strip">
+  <div class="rz nw" data-d="nw"></div><div class="rz n" data-d="n"></div><div class="rz ne" data-d="ne"></div>
+  <div id="spaces"></div>
+  <button id="spmore" title="Пространства"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+  <div id="tabs"></div>
+  <button id="plus" title="Новая вкладка (Ctrl+T). Правый клик: приватная"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+  <div id="drag"></div>
+  <div id="wc">
+    <button id="wmin" title="Свернуть"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button>
+    <button id="wmax" title="Развернуть"></button>
+    <button id="wclose" title="Закрыть"><svg viewBox="0 0 10 10"><path d="M.5.5l9 9M9.5.5l-9 9"/></svg></button>
+  </div>
+</div>
+<div id="bar">
+  <button class="btn" id="back" title="Назад (Alt+←)"><svg viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></button>
+  <button class="btn" id="fwd" title="Вперёд (Alt+→)"><svg viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg></button>
+  <button class="btn" id="reload" title="Обновить (F5)"></button>
+  <div id="omni">
+    <span id="sec"></span>
+    <div id="ubox">
+      <input id="url" spellcheck="false" autocomplete="off" placeholder="Поиск или адрес сайта">
+      <div id="uview" hidden><span class="dom"></span><span class="ttl"></span></div>
+    </div>
+    <button id="tr" class="hide" title="Перевести страницу"><svg viewBox="0 0 24 24"><path d="M3 5h10M8 3v2M5 9c1.5 3 4 5 7 6M11 5c-1 4-3.5 7.5-7 9.5"/><path d="M13 21l4-10 4 10M14.5 17.5h5"/></svg></button>
+    <button id="star" title="Закладка (Ctrl+D)"><svg viewBox="0 0 24 24"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/></svg></button>
+  </div>
+  <button class="btn" id="shield"><svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path class="slash" d="M3.5 3.5l17 17"/></svg><span id="badge"></span></button>
+  <div id="xbar"></div>
+  <button class="btn" id="dlbtn" title="Загрузки"><svg class="dlic" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><svg class="ring" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg></button>
+  <button class="btn" id="menu" title="Меню"><svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg></button>
+</div>
+<div id="dback" hidden></div>
+<div id="drop"></div>
+
+<div id="panel" hidden>
+  <div id="pbg"></div><div id="pscrim"></div>
+  <div id="tcard" class="card">
+    <div id="tgrid"></div>
+    <div id="tbar" hidden>
+      <button id="taddbtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>Добавить сайт</button>
+      <button id="tdone">Готово</button>
+    </div>
+    <div id="tform" hidden>
+      <div class="tfrow">
+        <input id="turl" spellcheck="false" autocomplete="off" placeholder="адрес или название сайта">
+        <input id="ttitle" spellcheck="false" autocomplete="off" placeholder="подпись" hidden>
+        <button class="tbtn" id="tsig">Добавить подпись</button>
+        <button class="tbtn pri" id="tok">Добавить</button>
+        <button class="tbtn" id="tcancel">Отмена</button>
+      </div>
+      <div id="tsuggwrap">
+        <div id="ttabs"><button data-t="popular" class="on">Популярные</button><button data-t="recent">Недавно посещённые</button></div>
+        <div id="tsugg"></div>
+      </div>
+    </div>
+  </div>
+  <div id="tbgmenu" class="pmenu" hidden>
+    <div class="mi" data-a="edit">Настроить Табло</div>
+    <div class="sep"></div>
+    <div class="mi sub">Размер плиток<svg class="chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+      <div class="pmenu subm">
+        <div class="mi" data-size="small">Маленькие<svg class="ck" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></div>
+        <div class="mi" data-size="medium">Средние<svg class="ck" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></div>
+        <div class="mi" data-size="large">Большие<svg class="ck" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></div>
+      </div>
+    </div>
+    <div class="mi sub">Ширина Табло<svg class="chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+      <div class="pmenu subm">
+        <div class="mi" data-width="auto">Подстраивать под окно<svg class="ck" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></div>
+        <div class="mi" data-width="small">Маленькая<svg class="ck" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></div>
+        <div class="mi" data-width="medium">Средняя<svg class="ck" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></div>
+        <div class="mi" data-width="large">Большая<svg class="ck" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></div>
+      </div>
+    </div>
+  </div>
+  <div id="dcard" class="card">
+    <div class="dhead"><b>Загрузки</b><button class="dlink" id="dfolder">Открыть папку</button></div>
+    <div id="dlist"></div>
+    <div class="dfoot" id="dfoot"><button class="dlink" id="dclear">Скрыть загруженные</button></div>
+  </div>
+  <div id="dmenu" class="pmenu" hidden></div>
+  <div id="xcard" class="card">
+    <div class="dhead"><b>Расширения</b><button class="dlink" id="xfolder">Открыть папку</button></div>
+    <div id="xlist"></div>
+    <div class="xhint">Чтобы добавить расширение, распакуйте его в отдельную папку внутри папки расширений и перезапустите браузер.</div>
+  </div>
+  <div id="tmenu" class="pmenu" hidden>
+    <div class="mi" data-a="open"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18"/></svg>Открыть в новой вкладке</div>
+    <div class="mi" data-a="copy"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>Копировать ссылку</div>
+    <div class="mi" data-a="edit"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>Изменить</div>
+    <div class="sep"></div>
+    <div class="mi del" data-a="del"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>Удалить</div>
+  </div>
+  <div id="scard" class="card">
+    <div class="lsec">Пространства</div>
+    <div id="slist"></div>
+    <div class="srow add" id="sadd"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg><span>Новое пространство</span></div>
+  </div>
+  <div id="smenu" class="pmenu" hidden>
+    <div class="mi" data-a="rename"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>Переименовать</div>
+    <div class="mic"></div>
+    <div class="msw"></div>
+    <div class="sep"></div>
+    <div class="mi del" data-a="del"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>Удалить пространство</div>
+  </div>
+</div>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const GLASS = !!window.__glass;
+if (GLASS) document.documentElement.classList.add('glass');
+const send = o => window.ipc.postMessage(JSON.stringify(o));
+const svg = d => `<svg viewBox="0 0 24 24">${d}</svg>`;
+const I = {
+  reload: svg('<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>'),
+  stop:   svg('<path d="M18 6L6 18M6 6l12 12"/>'),
+  x:      svg('<path d="M18 6L6 18M6 6l12 12"/>'),
+  lock:   svg('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'),
+  search: svg('<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>'),
+  warn:   svg('<path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>'),
+  mask:   svg('<circle cx="6" cy="15" r="3"/><circle cx="18" cy="15" r="3"/><path d="M9 15h6M3 10h18M6 10l2-5h8l2 5"/>'),
+  globe:  svg('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>'),
+  clock:  svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+  star:   svg('<path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>'),
+  tab:    svg('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18"/>'),
+  grid:   svg('<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>'),
+  undo:   svg('<path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>'),
+  pen:    svg('<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>'),
+  trash:  svg('<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>'),
+  sound:  svg('<path d="M11 5L6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>'),
+  muted:  svg('<path d="M11 5L6 9H2v6h4l5 4z"/><path d="M22 9l-6 6M16 9l6 6"/>'),
+};
+const COLORS = ['#58b4f0', '#5ec8a0', '#f0a35e', '#ef6f8f', '#8a96ff', '#c48cff', '#e8d25a'];
+const plural = (n, one, few, many) => {
+  const a = n % 100, b = n % 10;
+  return a > 10 && a < 20 ? many : b === 1 ? one : b > 1 && b < 5 ? few : many;
+};
+
+let S = {tabs: [], active: 0, url: ''};
+const tabsEl = $('tabs'), url = $('url'), omni = $('omni'), drop = $('drop');
+const panel = $('panel');
+// Full URL with percent-escapes decoded, for editing ("…search?q=прив").
+const readable = u => { try { return decodeURI(u); } catch { return u; } };
+// Display form: no https/www, readable (percent-decoded) — "google.com/search?q=гитхаб".
+const shortUrl = u => {
+  const s = u.replace(/^https:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
+  try { return decodeURIComponent(s); } catch { return s; }
+};
+
+// ------------------------------------------------------------- tabs
+const els = new Map();
+let dragId = 0;
+
+function makeTab(id) {
+  const el = document.createElement('div');
+  el.className = 'tab';
+  el.draggable = true;
+  el.innerHTML = `<span class="fav"><img hidden><span class="l"></span></span><span class="ttl"></span>
+    <button class="snd"></button><button class="x" title="Закрыть (Ctrl+W)">${I.x}</button>`;
+  const img = el.querySelector('img');
+  img.onerror = () => { img.hidden = true; el.querySelector('.l').hidden = false; };
+  img.onload = () => { img.hidden = false; el.querySelector('.l').hidden = true; };
+  el.addEventListener('mousedown', e => {
+    if (e.button === 1) { e.preventDefault(); return; }
+    if (e.button === 0 && !e.target.closest('.x,.snd')) send({cmd: 'activate', id});
+  });
+  el.addEventListener('auxclick', e => { if (e.button === 1) send({cmd: 'close', id}); });
+  el.addEventListener('contextmenu', e => { e.preventDefault(); send({cmd: 'tabmenu', id}); });
+  el.querySelector('.x').addEventListener('click', e => { e.stopPropagation(); send({cmd: 'close', id}); });
+  el.querySelector('.snd').addEventListener('click', e => { e.stopPropagation(); send({cmd: 'mute', id}); });
+  el.addEventListener('dragstart', e => { dragId = id; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', ''); });
+  el.addEventListener('dragend', () => { dragId = 0; clearDrag(); });
+  el.addEventListener('dragover', e => {
+    if (!dragId) return;
+    e.preventDefault();
+    const r = el.getBoundingClientRect(), left = e.clientX < r.left + r.width / 2;
+    clearDrag(); el.classList.add(left ? 'drag-over-l' : 'drag-over-r');
+  });
+  el.addEventListener('drop', e => {
+    e.preventDefault();
+    if (!dragId || dragId === id) return clearDrag();
+    const r = el.getBoundingClientRect(), left = e.clientX < r.left + r.width / 2;
+    const order = S.tabs.map(t => t.id).filter(t => t !== dragId);
+    send({cmd: 'move', id: dragId, num: order.indexOf(id) + (left ? 0 : 1)});
+    clearDrag();
+  });
+  return el;
+}
+function clearDrag() { for (const el of els.values()) el.classList.remove('drag-over-l', 'drag-over-r'); }
+
+function updateTab(el, t) {
+  const cls = {active: t.id === S.active, pinned: t.pinned, private: t.private, sleeping: t.sleeping,
+               loading: t.loading, audio: t.audio, muted: t.muted};
+  for (const k in cls) el.classList.toggle(k, cls[k]);
+  const ttl = el.querySelector('.ttl');
+  if (ttl.textContent !== t.title) ttl.textContent = t.title;
+  el.title = t.sleeping ? t.title + '\n(спит, освобождает память)' : t.title;
+  const img = el.querySelector('img'), l = el.querySelector('.l');
+  const page = t.page || '';
+  if (page) {
+    if (l.dataset.p !== page) {
+      l.dataset.p = page;
+      l.innerHTML = {history: I.clock, bookmarks: I.star, settings: GEAR}[page] || I.grid;
+    }
+    l.classList.add('ic');
+    img.removeAttribute('src'); img.hidden = true; l.hidden = false;
+  } else {
+    if (l.dataset.p) { l.dataset.p = ''; l.classList.remove('ic'); }
+    l.textContent = (t.title || '?').trim().charAt(0).toUpperCase();
+    if (t.icon) {
+      if (img.getAttribute('src') !== t.icon) { img.hidden = true; l.hidden = false; img.src = t.icon; }
+    } else { img.removeAttribute('src'); img.hidden = true; l.hidden = false; }
+  }
+  const snd = el.querySelector('.snd');
+  const want = t.muted ? 'm' : 's';
+  if (snd.dataset.k !== want) { snd.dataset.k = want; snd.innerHTML = t.muted ? I.muted : I.sound; }
+  snd.title = t.muted ? 'Включить звук (Ctrl+M)' : 'Выключить звук (Ctrl+M)';
+}
+
+function renderTabs() {
+  const ids = new Set(S.tabs.map(t => t.id));
+  for (const [id, el] of els) if (!ids.has(id)) { el.remove(); els.delete(id); }
+  let prev = null;
+  for (const t of S.tabs) {
+    let el = els.get(t.id);
+    if (!el) { el = makeTab(t.id); els.set(t.id, el); }
+    updateTab(el, t);
+    const at = prev ? prev.nextSibling : tabsEl.firstChild;
+    if (at !== el) tabsEl.insertBefore(el, at);
+    prev = el;
+  }
+  requestAnimationFrame(() => {
+    for (const el of els.values()) el.classList.toggle('narrow', el.offsetWidth < 90);
+    const a = els.get(S.active);
+    if (a) a.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  });
+}
+
+tabsEl.addEventListener('wheel', e => { tabsEl.scrollLeft += e.deltaY + e.deltaX; e.preventDefault(); }, {passive: false});
+$('plus').onclick = () => {
+  if (panelHome) focusUrlEmpty();
+  else if (panelKind === 'launch') closePanel();
+  else { $('plus').classList.add('on'); send({cmd: 'panel', text: 'launch', flag: true}); }
+};
+$('plus').oncontextmenu = e => { e.preventDefault(); send({cmd: 'new', flag: true}); };
+
+// ------------------------------------------------------------- spaces (strip)
+const toggleSpaces = () => panelKind === 'spaces' ? closePanel() : send({cmd: 'panel', text: 'spaces', flag: true});
+$('spmore').onclick = toggleSpaces;
+
+// One chip per space: tab count + name (the first space shows just the count).
+// Click switches; clicking the current one opens the panel; a tab dropped on a
+// chip moves into that space; the wheel flips through spaces.
+function renderChips() {
+  const box = $('spaces'), list = S.spaces || [];
+  const key = JSON.stringify([list, S.space && S.space.id]);
+  if (box.dataset.k === key) return;
+  box.dataset.k = key;
+  box.textContent = '';
+  list.forEach((s, i) => {
+    const b = document.createElement('button');
+    const cur = S.space && s.id === S.space.id;
+    b.className = 'chip' + (cur ? ' cur' : '') + (i === 0 ? ' only' : '');
+    b.style.setProperty('--c', s.color);
+    b.title = `${s.name} · ${s.count} ${plural(s.count, 'вкладка', 'вкладки', 'вкладок')}` + (i < 9 ? `\nCtrl+Shift+${i + 1}` : '');
+    b.append(badge(s));
+    if (i > 0) {
+      const n = document.createElement('span');
+      n.className = 'cnm';
+      n.textContent = s.name;
+      b.append(n);
+    }
+    b.onclick = () => cur ? toggleSpaces() : send({cmd: 'spaceGo', id: s.id});
+    b.addEventListener('dragover', e => { if (dragId && !cur) { e.preventDefault(); b.classList.add('drop-target'); } });
+    b.addEventListener('dragleave', () => b.classList.remove('drop-target'));
+    b.addEventListener('drop', e => {
+      e.preventDefault();
+      b.classList.remove('drop-target');
+      if (dragId && !cur) send({cmd: 'tabToSpace', id: dragId, num: s.id});
+    });
+    box.appendChild(b);
+  });
+}
+$('spaces').addEventListener('wheel', e => {
+  e.preventDefault();
+  const ids = (S.spaces || []).map(s => s.id);
+  if (ids.length < 2 || !S.space) return;
+  const i = ids.indexOf(S.space.id), j = (i + (e.deltaY > 0 ? 1 : -1) + ids.length) % ids.length;
+  send({cmd: 'spaceGo', id: ids[j]});
+}, {passive: false});
+
+// ------------------------------------------------------------- window frame
+// Empty space in the tab strip behaves like a title bar.
+$('strip').addEventListener('mousedown', e => {
+  if (e.button !== 0 || ![$('strip'), tabsEl, $('drag')].includes(e.target)) return;
+  e.preventDefault();
+  send(e.detail === 2 ? {cmd: 'max'} : {cmd: 'drag'});
+});
+for (const z of document.querySelectorAll('.rz')) {
+  z.addEventListener('mousedown', e => { if (e.button === 0) { e.preventDefault(); send({cmd: 'resize', text: z.dataset.d}); } });
+}
+$('wmin').onclick = () => send({cmd: 'min'});
+$('wmax').onclick = () => send({cmd: 'max'});
+$('wclose').onclick = () => send({cmd: 'quit'});
+
+// ------------------------------------------------------------- toolbar
+function renderBar() {
+  document.body.classList.toggle('private', !!S.private);
+  document.body.classList.toggle('max', !!S.max);
+  if (S.space) document.documentElement.style.setProperty('--sp', S.space.color);
+  renderChips();
+  $('wmax').innerHTML = S.max
+    ? '<svg viewBox="0 0 10 10"><path d="M2.5 2.5V.5h7v7h-2"/><rect x=".5" y="2.5" width="7" height="7"/></svg>'
+    : '<svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg>';
+  renderDlButton();
+  $('wmax').title = S.max ? 'Свернуть в окно' : 'Развернуть';
+  $('back').classList.toggle('off', !S.back);
+  $('fwd').classList.toggle('off', !S.fwd);
+  const rl = $('reload');
+  const want = S.loading ? 'stop' : 'reload';
+  if (rl.dataset.k !== want) {
+    rl.dataset.k = want; rl.innerHTML = I[want];
+    rl.title = S.loading ? 'Остановить' : 'Обновить (F5)';
+  }
+  const sec = $('sec'), u = S.url || '';
+  let k = 'search';
+  if (S.private && !u) k = 'mask';
+  else if (u.startsWith('https://')) k = 'lock';
+  else if (u.startsWith('http://')) k = 'warn';
+  if (sec.dataset.k !== k) { sec.dataset.k = k; sec.innerHTML = I[k]; }
+  sec.className = k === 'warn' ? 'warn' : k === 'mask' ? 'priv' : '';
+  sec.title = k === 'lock' ? 'Защищённое соединение' : k === 'warn' ? 'Соединение не защищено' : '';
+  if (document.activeElement !== url) url.value = shortUrl(u);
+  else if (!bars.url.edited && url.value !== readable(u)) { url.value = readable(u); url.select(); }
+  renderUrlView();
+  const star = $('star');
+  star.classList.toggle('on', !!S.star);
+  star.classList.toggle('hide', !S.canStar);
+  const tr = $('tr');
+  tr.classList.toggle('hide', !S.trShow);
+  tr.classList.toggle('on', !!S.tr);
+  tr.title = S.tr ? 'Показать оригинал' : 'Перевести страницу';
+  const sh = $('shield');
+  sh.classList.toggle('hide', !S.site);
+  sh.classList.toggle('on', !!S.shield);
+  sh.classList.toggle('paused', !S.shield);
+  sh.classList.toggle('count', (S.blocked || 0) > 0);
+  $('badge').textContent = S.blocked > 99 ? '99+' : (S.blocked || '');
+  sh.title = S.shield
+    ? `Защита включена · заблокировано: ${S.blocked || 0}\nНажмите, чтобы отключить на этом сайте`
+    : 'Защита выключена на этом сайте\nНажмите, чтобы включить';
+}
+
+// Idle address bar, Yandex-style: "site  page title"; the full URL shows on focus.
+function renderUrlView() {
+  const u = S.url || '', view = $('uview');
+  let dom = '';
+  if (/^https?:\/\//.test(u)) { try { dom = new URL(u).hostname.replace(/^www\./, ''); } catch {} }
+  const title = (S.title || '').trim();
+  const show = !!dom && !(panelHome || (panelKind === 'launch' && document.activeElement === url));
+  view.hidden = !show;
+  url.classList.toggle('viewing', show);
+  if (!show) return;
+  view.querySelector('.dom').textContent = dom;
+  view.querySelector('.ttl').textContent = title && title.toLowerCase() !== dom ? title : '';
+}
+
+$('back').onclick = () => send({cmd: 'back'});
+$('fwd').onclick = () => send({cmd: 'fwd'});
+$('reload').onclick = () => send({cmd: S.loading ? 'stop' : 'reload'});
+$('star').onclick = () => send({cmd: 'star'});
+$('tr').onclick = () => send({cmd: 'translate'});
+$('shield').onclick = () => send({cmd: 'shield'});
+$('menu').onclick = () => { const r = $('menu').getBoundingClientRect(); send({cmd: 'menu', x: r.right, y: r.bottom + 2}); };
+
+// ------------------------------------------------------------- suggestions (shared)
+// Two search inputs share one suggestion engine: the address bar ("url")
+// (the launcher has no input of its own any more).
+const bars = {
+  url: {el: url, typed: '', lastDel: false, edited: false},
+};
+let seq = 0, items = [], sel = -1, cur = 'url';
+
+function onInput(key, e) {
+  const b = bars[key];
+  cur = key;
+  b.lastDel = (e.inputType || '').startsWith('delete');
+  b.typed = b.el.value;
+  b.edited = true;
+  if (!b.typed.trim()) { items = []; sel = -1; render(); return; }
+  send({cmd: 'suggest', text: b.typed, num: ++seq});
+}
+
+function render() { renderDrop(); }
+
+// where: 'here' (current tab) | 'new' (new tab)
+function pick(it, where) {
+  if (it.kind === 'tab' && it.id) send({cmd: 'activate', id: it.id});
+  else send({cmd: 'go', text: it.title, url: it.url, flag: where === 'new'});
+}
+
+const KIND = {search: I.search, url: I.globe, history: I.clock, bookmark: I.star, tab: I.tab, closed: I.undo};
+function rowEl(it, i, onPick) {
+  const row = document.createElement('div');
+  row.className = 'row' + (i >= 0 && i === sel ? ' sel' : '');
+  row.innerHTML = KIND[it.kind] || I.globe;
+  const t = document.createElement('span'); t.className = 't';
+  t.textContent = it.kind === 'search' ? it.title : (it.title || shortUrl(it.url));
+  const u = document.createElement('span'); u.className = 'u';
+  u.textContent = it.kind === 'search' ? 'Поиск' : (it.kind === 'url' && it.title === shortUrl(it.url) ? '' : shortUrl(it.url));
+  row.append(t, u);
+  if (it.kind === 'tab') { const g = document.createElement('span'); g.className = 'tag'; g.textContent = 'Перейти на вкладку'; row.append(g); }
+  row.addEventListener('mousedown', e => { e.preventDefault(); onPick(it, e); });
+  if (i >= 0) row.addEventListener('mousemove', () => {
+    if (sel === i) return;
+    sel = i;
+    [...row.parentNode.children].forEach((r, j) => r.classList.toggle('sel', j === i));
+  });
+  return row;
+}
+
+function moveSel(e) {
+  if (!items.length) return;
+  e.preventDefault();
+  sel = (sel + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+  render();
+}
+
+// ------------------------------------------------------------- address bar
+url.addEventListener('focus', () => {
+  cur = 'url';
+  bars.url.edited = false;
+  omni.classList.add('focus');
+  url.value = readable(S.url || '');
+  setTimeout(() => url.select(), 0);
+  send({cmd: 'focus', flag: true});
+});
+url.addEventListener('blur', () => {
+  omni.classList.remove('focus');
+  url.setSelectionRange(0, 0); // no stale selection under the idle site + title view
+  closeDrop();
+  url.value = shortUrl(S.url || '');
+  send({cmd: 'focus', flag: false});
+});
+url.addEventListener('input', e => onInput('url', e));
+url.addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') moveSel(e);
+  else if (e.key === 'Enter') {
+    e.preventDefault();
+    const it = dropOpen ? items[sel] : null;
+    if (it) pick(it, e.altKey ? 'new' : 'here');
+    else if (url.value.trim()) send({cmd: 'go', text: url.value, flag: e.altKey});
+    url.blur();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    if (dropOpen) { closeDrop(); url.value = bars.url.typed; }
+    else if (dlOver) { e.stopPropagation(); setDlOver(false); }
+    else if (panelKind === 'launch' && !panelHome) closePanel();
+    else if (panelHome) url.value = '';
+    else { url.value = S.url || ''; url.blur(); send({cmd: 'content'}); }
+  }
+});
+
+// The dropdown is drawn while this webview still lies under the page; Rust
+// snapshots the page (mb.backdrop), and raises us once that is painted.
+// Hiding is the reverse: Rust lowers us first, then calls mb.dropHidden().
+let dropOpen = false;
+const dback = $('dback');
+
+function closeDrop() {
+  if (cur === 'url') { items = []; sel = -1; }
+  if (dropOpen) {
+    dropOpen = false;
+    if (panelGlass) send({cmd: 'gdrop', text: '{"items":[]}'});
+    else send({cmd: 'overlay', flag: false});
+  }
+}
+
+function renderDrop() {
+  if (!items.length) { closeDrop(); return; }
+  if (panelGlass) { // the Tablo is in the glass window over us: the list is drawn there
+    dropOpen = true;
+    send({cmd: 'gdrop', text: JSON.stringify({items, sel})});
+    return;
+  }
+  drop.textContent = '';
+  items.forEach((it, i) => drop.appendChild(rowEl(it, i, (it, e) => { pick(it, e.button === 1 ? 'new' : 'here'); url.blur(); })));
+  drop.classList.add('open');
+  if (!dropOpen) {
+    dropOpen = true;
+    dback.classList.remove('shown');
+    dback.style.backgroundImage = 'none';
+    dback.hidden = false;
+    send({cmd: 'overlay', flag: true});
+  }
+}
+
+// ------------------------------------------------------------- panels
+// Rust grows this webview *behind* the page and calls mb.panel(); we paint the
+// panel on an exact snapshot of the page, report "panelReady", Rust raises us in
+// one step, then mb.panelShown() animates the blur in. Nothing ever flashes.
+let panelKind = null, panelSeq = 0;
+// Downloads list shown as a layer over the Tablo; tile being prerendered.
+let dlOver = false, prerendered = '';
+// The Tablo is drawn by the glass window, not by this page (we only keep the
+// address bar's behaviour in sync).
+let panelGlass = false;
+// While this webview lies under the page its fresh frames reach the screen with a
+// lag; raising it too early shows a stale frame (a one-frame dark blink). Measured:
+// 0 ms blinks, 40 ms and 80 ms are clean.
+const RAISE_DELAY = 50;
+
+// "home": the launcher *is* the page of an empty space — not dismissable.
+let panelHome = false;
+
+function panelButtons() {
+  const launchOverlay = panelKind === 'launch' && !panelHome;
+  $('plus').classList.toggle('on', launchOverlay);
+  $('plus').title = launchOverlay ? 'Закрыть (Esc)' : 'Новая вкладка (Ctrl+T). Правый клик: приватная';
+  $('spmore').classList.toggle('on', panelKind === 'spaces');
+  $('dlbtn').classList.toggle('open', panelKind === 'downloads' || dlOver);
+}
+
+// Dropdown panels (downloads, extensions) don't freeze the page: Rust clips this
+// webview to the toolbar + these rectangles (the cards and menus with room for
+// their shadow), so outside them the live page shows.
+let lastClip = '', panelShownAt = 0;
+function sendClip() {
+  if (GLASS || panel.hidden || !panel.classList.contains('plain')) return;
+  const rects = [...panel.querySelectorAll('.card:not([hidden]), .pmenu:not([hidden])')]
+    .map(e => e.getBoundingClientRect()).filter(r => r.width && r.height)
+    .map(r => [r.left - 16, r.top - 10, r.right + 16, r.bottom + 22].map(Math.round));
+  const text = JSON.stringify(rects);
+  if (text !== lastClip) { lastClip = text; send({cmd: 'clip', text}); }
+}
+new ResizeObserver(() => sendClip()).observe($('dcard'));
+
+// Called by Rust *after* it has put the page back on top, so this is never seen.
+function hidePanelNow() {
+  panelSeq++;
+  panelShownAt = 0;
+  panelGlass = false;
+  if (GLASS) { drop.classList.remove('open'); drop.textContent = ''; }
+  dlOver = false;
+  $('dcard').classList.remove('over');
+  prerendered = '';
+  closeMenu();
+  panel.hidden = true;
+  panel.classList.remove('shown', 'home');
+  panelHome = false;
+  closeTmenu();
+  closeTform();
+  closeTbg();
+  closeDmenu();
+  setTabloEditing(false);
+  panelKind = null;
+  panelButtons();
+}
+
+// The user picked something: the panel is done, Rust will hide it.
+function panelGone() {
+  panelKind = null;
+  panelButtons();
+}
+
+// User closes: animate the blur out, then let Rust put the page back on top.
+function closePanel() {
+  if (!panelKind || panelHome) return;
+  if (panelGlass) { panelSeq++; panelGone(); send({cmd: 'panel', flag: false}); return; }
+  const my = ++panelSeq;
+  panelGone();
+  panel.classList.remove('shown');
+  setTimeout(() => { if (my === panelSeq) send({cmd: 'panel', flag: false}); }, 180);
+}
+
+window.mb = {
+  state(s) { S = s; renderTabs(); renderBar(); },
+  focusUrl() { url.focus(); url.select(); },
+  suggest(n, r) {
+    if (n !== seq) return;
+    const b = bars[cur];
+    if (document.activeElement !== b.el) return;
+    items = r.items || [];
+    const c = r.complete;
+    if (c && !b.lastDel && b.el.value === b.typed && b.typed && c.text.startsWith(b.typed.toLowerCase())) {
+      b.el.value = b.typed + c.text.slice(b.typed.length);
+      b.el.setSelectionRange(b.typed.length, b.el.value.length);
+    } else if (c && items.length && items[0].url === c.url) {
+      items.shift();
+    }
+    sel = 0;
+    render();
+  },
+  // We lie under the page here; paint the panel on the exact snapshot, then
+  // ask to be raised. Until the blur starts it looks exactly like the page.
+  panel(kind, data, bg, home, glass) {
+    closeDrop();
+    if (glass) { // drawn by the glass window; here only the bookkeeping
+      panelSeq++;
+      panelKind = kind;
+      panelHome = false;
+      panelGlass = true;
+      panel.hidden = true;
+      panelButtons();
+      return;
+    }
+    const my = ++panelSeq;
+    panelKind = kind;
+    panelHome = kind === 'launch' && !!home;
+    panel.classList.toggle('home', panelHome);
+    panel.classList.remove('shown');
+    panel.hidden = false;
+    $('tcard').hidden = kind !== 'launch';
+    $('scard').hidden = kind !== 'spaces';
+    $('dcard').hidden = kind !== 'downloads';
+    $('xcard').hidden = kind !== 'extensions';
+    dlOver = false;
+    $('dcard').classList.remove('over');
+    prerendered = '';
+    if (kind === 'launch') warmOrigins(data || {});
+    panel.classList.toggle('plain', kind === 'downloads' || kind === 'extensions');
+    const pbg = $('pbg');
+    pbg.style.backgroundImage = 'none';
+    if (kind === 'launch') { closeTform(); setTabloEditing(false); renderTablo(data || {}); }
+    else if (kind === 'downloads') renderDownloads(data || {});
+    else if (kind === 'extensions') renderExt(data || {});
+    else renderSpaces(data || {});
+    panelButtons();
+    // glass: hidden until Rust shows it, so animation frames would not run yet.
+    if (GLASS) { send({cmd: 'panelReady'}); return; }
+    const ready = () => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => {
+      if (my !== panelSeq) return;
+      lastClip = '';
+      sendClip();
+      send({cmd: 'panelReady'});
+    }, RAISE_DELAY)));
+    if (!bg) return ready();
+    const img = new Image();
+    img.src = bg;
+    img.decode().catch(() => {}).then(() => {
+      if (my !== panelSeq) return;
+      pbg.style.backgroundImage = `url("${bg}")`;
+      ready();
+    });
+  },
+  panelShown() {
+    if (!panelKind) return;
+    panelShownAt = performance.now();
+    if (panelKind === 'launch' && !GLASS) focusUrlEmpty();
+    // Start the blur on the first frame after we are on top, so it animates.
+    requestAnimationFrame(() => { if (panelKind) panel.classList.add('shown'); });
+  },
+  hidePanel() { hidePanelNow(); },
+  // glass: the main page's suggestion list, drawn over the Tablo
+  gdrop(d) {
+    items = d.items || [];
+    sel = d.sel ?? -1;
+    drop.textContent = '';
+    items.forEach((it, i) => drop.appendChild(rowEl(it, i, (it, e) => pick(it, e.button === 1 ? 'new' : 'here'))));
+    drop.classList.toggle('open', items.length > 0);
+  },
+  toggleDl() { if (panelKind === 'launch') setDlOver(!dlOver); },
+  focusLaunch() { focusUrlEmpty(); },
+  tabloData(d) { if (panelKind === 'launch') renderTablo(d); },
+  spacesData(d) { if (panelKind === 'spaces') renderSpaces(d); },
+  downloadsData(d) { if (panelKind === 'downloads' || dlOver) renderDownloads(d); },
+  extData(d) { if (panelKind === 'extensions') renderExt(d); },
+  backdrop(bg) {
+    if (!dropOpen) return;
+    const img = new Image();
+    img.src = bg;
+    img.decode().catch(() => {}).then(() => {
+      if (!dropOpen) return;
+      dback.style.backgroundImage = `url("${bg}")`;
+      requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => {
+        if (dropOpen) send({cmd: 'dropReady'});
+      }, RAISE_DELAY)));
+    });
+  },
+  dropShown() { requestAnimationFrame(() => { if (dropOpen) dback.classList.add('shown'); }); },
+  dropHidden() {
+    if (dropOpen) return;
+    drop.classList.remove('open');
+    dback.classList.remove('shown');
+    dback.hidden = true;
+  },
+};
+
+panel.addEventListener('mousedown', e => {
+  if (e.target.closest('.pmenu')) return;
+  // Downloads over the Tablo: a click elsewhere just closes the list (a tile
+  // still opens, the background does not close the Tablo).
+  if (dlOver && !e.target.closest('#dcard')) {
+    setDlOver(false);
+    if (!e.target.closest('.tile')) { e.preventDefault(); return; }
+  }
+  if (!smenu.hidden && !e.target.closest('.sdots')) closeMenu();
+  if (!tmenu.hidden && !e.target.closest('.tdots')) closeTmenu();
+  if (!tbgmenu.hidden) closeTbg();
+  if (!dmenu.hidden && !e.target.closest('.dbtn')) closeDmenu();
+  if (!e.target.closest('.card')) { e.preventDefault(); closePanel(); }
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && dlOver) {
+    e.preventDefault();
+    if (!dmenu.hidden) closeDmenu(); else setDlOver(false);
+    return;
+  }
+  if (e.key === 'Escape' && panelKind === 'launch' && !e.target.closest('input')) {
+    e.preventDefault();
+    if (!tmenu.hidden) closeTmenu();
+    else if (!tbgmenu.hidden) closeTbg();
+    else if (!$('tform').hidden) closeTform();
+    else if (tabloEditing) setTabloEditing(false);
+    else closePanel();
+    return;
+  }
+  if (e.key === 'Escape' && panelKind === 'extensions') { e.preventDefault(); closePanel(); return; }
+  if (e.key === 'Escape' && panelKind === 'downloads') {
+    e.preventDefault();
+    if (!dmenu.hidden) closeDmenu(); else closePanel();
+    return;
+  }
+  if (e.key !== 'Escape' || panelKind !== 'spaces' || e.target.closest('.srow')) return;
+  e.preventDefault();
+  if (!$('smenu').hidden) closeMenu(); else closePanel();
+});
+
+// ---- Tablo ("+" / Ctrl+T / empty space): the user's own site tiles, like Yandex.
+// Typing goes to the address bar (focused and empty); Enter there opens a new tab.
+let tablo = {tablo: [], popular: [], recent: []};
+let tabloEdit = -1;      // index being edited, -1 = adding
+let tabloTab = 'popular';
+let tabloDrag = -1;
+const tmenu = $('tmenu');
+let tmenuFor = -1;
+
+function focusUrlEmpty() {
+  url.focus();
+  url.value = '';
+  Object.assign(bars.url, {typed: '', edited: true});
+}
+
+// Big icon: Yandex's icon service (120px for known sites, 1x1 = unknown), the
+// site's apple-touch-icon, DuckDuckGo's service, /favicon.ico, then a letter.
+function siteIcon(host, title, icon) {
+  const box = document.createElement('div');
+  box.className = 'tic';
+  if (icon && icon.startsWith('data:')) {
+    const img = new Image();
+    img.onload = () => { img.className = img.naturalWidth < 48 ? 'small' : ''; };
+    img.src = icon;
+    box.appendChild(img);
+    return box;
+  }
+  const letter = document.createElement('span');
+  letter.textContent = (title || host || '?').trim().charAt(0).toUpperCase();
+  box.appendChild(letter);
+  if (!host) return box;
+  const isIp = /^[\d.:[\]]+$/.test(host);
+  const tries = [];
+  if (!isIp) tries.push(`https://favicon.yandex.net/favicon/v2/${host}?size=120`);
+  tries.push(`https://${host}/apple-touch-icon.png`);
+  if (!isIp) tries.push(`https://icons.duckduckgo.com/ip3/${host}.ico`);
+  tries.push(`${isIp ? 'http' : 'https'}://${host}/favicon.ico`);
+  if (icon) tries.unshift(icon); // learned from the site itself: best quality
+  const img = new Image();
+  img.onload = () => {
+    if (img.naturalWidth < 2) return img.onerror();
+    img.className = img.naturalWidth < 48 ? 'small' : '';
+    letter.remove();
+    box.appendChild(img);
+  };
+  img.onerror = () => { const next = tries.shift(); if (next) img.src = next; };
+  img.onerror();
+  return box;
+}
+
+function renderTablo(d) {
+  tablo = d;
+  closeTmenu();
+  const grid = $('tgrid');
+  grid.textContent = '';
+  (d.tablo || []).forEach((t, i) => {
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+    tile.title = t.url;
+    tile.draggable = true;
+    const nm = document.createElement('div');
+    nm.className = 'tnm';
+    nm.textContent = t.title || t.host;
+    const dots = document.createElement('button');
+    dots.className = 'tdots';
+    dots.title = 'Ещё';
+    dots.innerHTML = '<svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>';
+    const ed = document.createElement('div');
+    ed.className = 'tedit';
+    ed.innerHTML = '<button data-a="edit" title="Изменить"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button>'
+      + '<button data-a="del" title="Удалить"><svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>';
+    ed.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+    ed.addEventListener('click', e => {
+      e.stopPropagation();
+      const b = e.target.closest('button');
+      if (b && b.dataset.a === 'edit') openTform(i);
+      if (b && b.dataset.a === 'del') send({cmd: 'tabloDel', num: i});
+    });
+    tile.append(siteIcon(t.host, t.title, t.icon), nm, dots, ed);
+    tile.addEventListener('click', e => {
+      if (e.target.closest('.tdots,.tedit')) return;
+      if (tabloEditing) { openTform(i); return; }
+      pick({kind: 'url', title: t.title, url: t.url}, 'new');
+      panelGone();
+    });
+    let dwell = 0;
+    tile.addEventListener('mouseenter', () => { if (!tabloEditing) dwell = setTimeout(() => prerender(t.url), 90); });
+    tile.addEventListener('mouseleave', () => clearTimeout(dwell));
+    tile.addEventListener('mousedown', e => {
+      if (e.button <= 1 && !tabloEditing && !e.target.closest('.tdots,.tedit')) prerender(t.url);
+    });
+    tile.addEventListener('auxclick', e => { if (e.button === 1) { pick({kind: 'url', title: t.title, url: t.url}, 'new'); panelGone(); } });
+    dots.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+    dots.onclick = e => { e.stopPropagation(); tmenuFor === i ? closeTmenu() : openTmenu(i, dots.getBoundingClientRect()); };
+    tile.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      openTmenu(i, {left: e.clientX, right: e.clientX + 1, top: e.clientY, bottom: e.clientY}, true);
+    });
+    tile.addEventListener('dragstart', e => { tabloDrag = i; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', ''); });
+    tile.addEventListener('dragend', () => { tabloDrag = -1; grid.querySelectorAll('.tile').forEach(x => x.classList.remove('over')); });
+    tile.addEventListener('dragover', e => { if (tabloDrag >= 0 && tabloDrag !== i) { e.preventDefault(); tile.classList.add('over'); } });
+    tile.addEventListener('dragleave', () => tile.classList.remove('over'));
+    tile.addEventListener('drop', e => {
+      e.preventDefault();
+      tile.classList.remove('over');
+      if (tabloDrag >= 0 && tabloDrag !== i) send({cmd: 'tabloMove', num: tabloDrag, id: i});
+    });
+    grid.appendChild(tile);
+  });
+  const view = d.view || {};
+  $('tcard').dataset.size = view.size || 'large';
+  $('tcard').dataset.width = view.width || 'auto';
+  if (!$('tform').hidden) renderTsugg();
+}
+
+// Prerender: the pointer rests on a tile → Rust starts loading it in a hidden
+// webview that becomes the tab on click.
+function prerender(u) {
+  if (panelKind !== 'launch' || !u || u === prerendered) return;
+  prerendered = u;
+  send({cmd: 'prerender', url: u});
+}
+
+// Warm DNS + TLS to the Tablo's sites while the user is choosing (idle sockets
+// live ~10 s, so this is redone every time the launcher opens).
+function warmOrigins(d) {
+  document.querySelectorAll('link[rel=preconnect]').forEach(l => l.remove());
+  for (const t of (d.tablo || []).slice(0, 16)) {
+    let o;
+    try { o = new URL(t.url).origin; } catch { continue; }
+    if (!/^https?:/.test(o)) continue;
+    const l = document.createElement('link');
+    l.rel = 'preconnect';
+    l.href = o;
+    document.head.appendChild(l);
+  }
+}
+
+// glass: its inputs (Tablo add/edit form) need the keyboard, which normally
+// stays with the address bar in the main window.
+if (GLASS) {
+  document.addEventListener('focusin', e => { if (e.target.matches('input')) send({cmd: 'glassFocus', flag: true}); });
+  document.addEventListener('focusout', e => {
+    if (e.target.matches('input') && !(e.relatedTarget && e.relatedTarget.matches('input'))) send({cmd: 'glassFocus', flag: false});
+  });
+}
+
+function openTmenu(i, r, atCursor) {
+  closeTmenu();
+  tmenuFor = i;
+  tmenu.hidden = false;
+  const top = panel.getBoundingClientRect().top;
+  const left = atCursor ? r.left : r.right - tmenu.offsetWidth;
+  tmenu.style.left = Math.max(8, Math.min(left, innerWidth - tmenu.offsetWidth - 8)) + 'px';
+  tmenu.style.top = (r.bottom - top + 4) + 'px';
+}
+function closeTmenu() { tmenuFor = -1; tmenu.hidden = true; }
+
+tmenu.addEventListener('mousedown', e => e.preventDefault());
+tmenu.addEventListener('click', e => {
+  const a = e.target.closest('.mi');
+  const t = (tablo.tablo || [])[tmenuFor];
+  const i = tmenuFor;
+  if (!a || !t) return;
+  closeTmenu();
+  if (a.dataset.a === 'open') { pick({kind: 'url', title: t.title, url: t.url}, 'new'); panelGone(); }
+  else if (a.dataset.a === 'copy') copyText(t.url);
+  else if (a.dataset.a === 'edit') openTform(i);
+  else if (a.dataset.a === 'del') send({cmd: 'tabloDel', num: i});
+});
+
+function copyText(s) {
+  const ta = document.createElement('textarea');
+  ta.value = s;
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  ta.remove();
+}
+
+// Add / edit form: address or name, optional caption, plus history picks.
+function openTform(i) {
+  closeTmenu();
+  tabloEdit = i;
+  const t = i >= 0 ? tablo.tablo[i] : null;
+  $('turl').value = t ? t.url : '';
+  $('ttitle').value = t ? t.title : '';
+  $('ttitle').hidden = !t;
+  $('tsig').hidden = !!t;
+  $('tok').textContent = t ? 'Сохранить' : 'Добавить';
+  $('tsuggwrap').hidden = !!t;
+  $('tform').hidden = false;
+  renderTsugg();
+  $('turl').focus();
+  $('turl').select();
+}
+function closeTform() { $('tform').hidden = true; tabloEdit = -1; }
+
+function submitTform() {
+  const text = $('turl').value.trim();
+  if (!text) return;
+  const title = $('ttitle').value.trim();
+  if (tabloEdit >= 0) send({cmd: 'tabloEdit', num: tabloEdit, text, title});
+  else send({cmd: 'tabloAdd', text, title});
+  closeTform();
+}
+
+function renderTsugg() {
+  const have = new Set((tablo.tablo || []).map(t => t.host));
+  const list = (tablo[tabloTab] || []).filter(s => !have.has(s.host)).slice(0, 10);
+  const box = $('tsugg');
+  box.textContent = '';
+  for (const s of list) {
+    const b = document.createElement('button');
+    b.className = 'tsg';
+    b.title = s.url;
+    b.append(siteIcon(s.host, s.title, s.icon));
+    const n = document.createElement('span');
+    n.textContent = s.title;
+    b.append(n);
+    b.onclick = () => { send({cmd: 'tabloAdd', text: s.url, title: s.title}); closeTform(); };
+    box.appendChild(b);
+  }
+  if (!list.length) { const e = document.createElement('div'); e.className = 'tempty'; e.textContent = 'Пока пусто'; box.appendChild(e); }
+  document.querySelectorAll('#ttabs button').forEach(b => b.classList.toggle('on', b.dataset.t === tabloTab));
+}
+
+$('tsig').onclick = () => { $('tsig').hidden = true; $('ttitle').hidden = false; $('ttitle').focus(); };
+$('tok').onclick = submitTform;
+$('tcancel').onclick = closeTform;
+document.querySelectorAll('#ttabs button').forEach(b => b.onclick = () => { tabloTab = b.dataset.t; renderTsugg(); });
+for (const id of ['turl', 'ttitle']) {
+  $(id).addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); submitTform(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeTform(); }
+  });
+}
+
+
+// ---- Tablo edit mode + background menu ("Настроить Табло", tile size, width)
+let tabloEditing = false;
+const tbgmenu = $('tbgmenu');
+function setTabloEditing(on) {
+  tabloEditing = on;
+  $('tcard').classList.toggle('editing', on);
+  $('tbar').hidden = !on;
+  if (!on) closeTform();
+}
+function closeTbg() { tbgmenu.hidden = true; }
+$('taddbtn').onclick = () => openTform(-1);
+$('tdone').onclick = () => setTabloEditing(false);
+panel.addEventListener('contextmenu', e => {
+  if (panelKind !== 'launch' || e.target.closest('.tile,.pmenu,#tform,input')) return;
+  e.preventDefault();
+  closeTmenu();
+  const view = tablo.view || {};
+  tbgmenu.querySelectorAll('[data-size]').forEach(x => x.classList.toggle('on', x.dataset.size === (view.size || 'large')));
+  tbgmenu.querySelectorAll('[data-width]').forEach(x => x.classList.toggle('on', x.dataset.width === (view.width || 'auto')));
+  tbgmenu.hidden = false;
+  const top = panel.getBoundingClientRect().top;
+  tbgmenu.style.left = Math.min(e.clientX, innerWidth - tbgmenu.offsetWidth - 260) + 'px';
+  tbgmenu.style.top = Math.min(e.clientY - top, panel.clientHeight - tbgmenu.offsetHeight - 8) + 'px';
+});
+tbgmenu.addEventListener('mousedown', e => e.preventDefault());
+tbgmenu.addEventListener('click', e => {
+  const m = e.target.closest('.mi');
+  if (!m || m.classList.contains('sub')) return;
+  closeTbg();
+  if (m.dataset.a === 'edit') setTabloEditing(true);
+  else if (m.dataset.size) send({cmd: 'tabloView', text: 'size:' + m.dataset.size});
+  else if (m.dataset.width) send({cmd: 'tabloView', text: 'width:' + m.dataset.width});
+});
+
+// ---- Downloads: toolbar button with a progress ring, dropdown list, per-file menu
+let dl = {items: []};
+const dmenu = $('dmenu');
+let dmenuFor = null;
+
+function renderDlButton() {
+  const b = $('dlbtn'), st = S.dl || {};
+  const active = (st.active || 0) > 0, known = active && st.progress >= 0;
+  b.classList.toggle('active', active);
+  b.classList.toggle('indet', active && !known);
+  b.classList.toggle('unseen', !active && !!st.unseen);
+  const c = b.querySelector('.ring circle'), len = 2 * Math.PI * 10;
+  c.style.strokeDasharray = len;
+  c.style.strokeDashoffset = active ? len * (1 - (known ? Math.max(0.04, st.progress) : 0.28)) : len;
+  b.title = active ? `Загрузки: ${st.active}` : 'Загрузки';
+}
+// Over the Tablo the list opens as a layer: the Tablo stays where it is.
+function setDlOver(on) {
+  if (dlOver === on) return;
+  dlOver = on;
+  $('dcard').hidden = !on;
+  $('dcard').classList.toggle('over', on);
+  if (!on) closeDmenu();
+  panelButtons();
+  send({cmd: 'dlWatch', flag: on});
+}
+$('dlbtn').onclick = () => {
+  if (panelKind === 'downloads') closePanel();
+  else if (panelGlass) send({cmd: 'glassDl'});
+  else if (panelKind === 'launch') setDlOver(!dlOver);
+  else send({cmd: 'panel', text: 'downloads', flag: true});
+};
+$('dfolder').onclick = () => send({cmd: 'dl', text: 'folder'});
+$('dclear').onclick = () => send({cmd: 'dl', text: 'clear'});
+
+// ---- Extensions panel: on/off, settings page, remove
+const GEAR = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>';
+function renderExt(d) {
+  const list = $('xlist');
+  list.textContent = '';
+  const items = d.items || [];
+  if (!items.length) {
+    const e = document.createElement('div');
+    e.className = 'dempty';
+    e.textContent = 'Расширений пока нет';
+    list.appendChild(e);
+  }
+  for (const it of items) {
+    const row = document.createElement('div');
+    row.className = 'xrow' + (it.enabled ? '' : ' off');
+    const ic = document.createElement('div');
+    ic.className = 'xic';
+    if (it.icon) { const im = new Image(); im.src = it.icon; ic.appendChild(im); }
+    else ic.textContent = (it.name || '?').trim().charAt(0).toUpperCase();
+    const txt = document.createElement('div');
+    txt.className = 'dtxt';
+    const nm = document.createElement('div');
+    nm.className = 'xname';
+    nm.textContent = it.name;
+    const st = document.createElement('div');
+    st.className = 'dstat';
+    st.textContent = [it.version && 'Версия ' + it.version, it.enabled ? 'Включено' : 'Выключено'].filter(Boolean).join(' · ');
+    txt.append(nm, st);
+    const act = document.createElement('div');
+    act.className = 'dact';
+    if (it.options) {
+      const o = document.createElement('button');
+      o.className = 'dbtn';
+      o.title = 'Настройки расширения';
+      o.innerHTML = GEAR;
+      o.onclick = () => send({cmd: 'ext', text: 'options', url: it.id});
+      act.appendChild(o);
+    }
+    const del = document.createElement('button');
+    del.className = 'dbtn hov';
+    del.title = 'Удалить';
+    del.innerHTML = I.trash;
+    del.onclick = () => send({cmd: 'ext', text: 'remove', url: it.id});
+    act.appendChild(del);
+    const sw = document.createElement('button');
+    sw.className = 'sw' + (it.enabled ? ' on' : '');
+    sw.title = it.enabled ? 'Выключить' : 'Включить';
+    sw.onclick = () => {
+      sw.classList.toggle('on');
+      send({cmd: 'ext', text: 'toggle', url: it.id, flag: !it.enabled});
+    };
+    row.append(ic, txt, act, sw);
+    list.appendChild(row);
+  }
+}
+$('xfolder').onclick = () => send({cmd: 'ext', text: 'folder'});
+
+// Extensions' toolbar buttons (like Chrome's): a click opens the extension's popup
+// under the button, in a window of its own (Rust: xpopup.rs).
+window.mb.extActions = list => {
+  const bar = $('xbar');
+  bar.textContent = '';
+  for (const it of list || []) {
+    const b = document.createElement('button');
+    b.className = 'btn xa';
+    b.title = it.name;
+    if (it.icon) { const im = new Image(); im.src = it.icon; b.appendChild(im); }
+    else { b.textContent = (it.name || '?').trim().charAt(0).toUpperCase(); }
+    b.onclick = () => {
+      const r = b.getBoundingClientRect();
+      send({cmd: 'extPopup', url: it.id, x: r.right, y: $('bar').getBoundingClientRect().bottom});
+    };
+    bar.appendChild(b);
+  }
+};
+new ResizeObserver(() => sendClip()).observe($('xcard'));
+
+function fmtBytes(n) {
+  if (!(n >= 0)) return '';
+  const u = ['Б', 'КБ', 'МБ', 'ГБ'];
+  let i = 0;
+  while (n >= 1024 && i < 3) { n /= 1024; i++; }
+  const v = i === 0 ? String(n) : n.toFixed(n < 10 ? 1 : 0);
+  return v.replace('.', ',') + ' ' + u[i];
+}
+const EXT_COLOR = [
+  [/^(mp4|mkv|avi|mov|webm|wmv|flv)$/, '#ef6f8f'], [/^(mp3|wav|flac|ogg|m4a|aac|opus)$/, '#c48cff'],
+  [/^(png|jpe?g|gif|webp|svg|bmp|ico|heic|avif)$/, '#5ec8a0'], [/^(zip|7z|rar|tar|gz|bz2|xz)$/, '#e8d25a'],
+  [/^(exe|msi|bat|cmd|apk)$/, '#58b4f0'], [/^(pdf|docx?|xlsx?|pptx?|txt|rtf|odt|csv|md)$/, '#f0a35e'],
+];
+function fileIcon(ext) {
+  const box = document.createElement('div');
+  box.className = 'fic';
+  const color = (EXT_COLOR.find(([re]) => re.test(ext)) || [0, '#9a9ca6'])[1];
+  box.style.setProperty('--c', color);
+  box.innerHTML = '<svg viewBox="0 0 28 34"><path d="M4 2h13l7 7v23H4z" fill="#ffffff0d" stroke="#ffffff40"/><path d="M17 2v7h7" fill="none" stroke="#ffffff40"/></svg>';
+  const l = document.createElement('span');
+  l.textContent = (ext || '').slice(0, 4).toUpperCase();
+  box.appendChild(l);
+  return box;
+}
+function dlStatus(d) {
+  if (d.state === 0) {
+    if (d.paused) return 'Пауза';
+    return d.total > 0 ? `${fmtBytes(d.received)} из ${fmtBytes(d.total)}` : fmtBytes(d.received) || 'Начинается';
+  }
+  if (d.state === 1) return d.exists ? fmtBytes(d.total > 0 ? d.total : d.received) : 'Файл удалён';
+  return d.state === 2 ? 'Ошибка загрузки' : 'Отменено';
+}
+const ICON = {
+  pause: '<svg viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></svg>',
+  play: '<svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></svg>',
+  x: '<svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>',
+  more: '<svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>',
+};
+function renderDownloads(d) {
+  dl = d;
+  closeDmenu();
+  const list = $('dlist');
+  list.textContent = '';
+  const items = d.items || [];
+  for (const it of items) {
+    const row = document.createElement('div');
+    row.className = 'drow' + (it.state !== 0 && !(it.state === 1 && it.exists) ? ' gone' : '');
+    const txt = document.createElement('div');
+    txt.className = 'dtxt';
+    const nm = document.createElement('div');
+    nm.className = 'dname';
+    nm.textContent = it.name || it.url;
+    nm.title = it.name || it.url;
+    const st = document.createElement('div');
+    st.className = 'dstat';
+    st.textContent = dlStatus(it);
+    txt.append(nm, st);
+    if (it.state === 0) {
+      const bar = document.createElement('div');
+      bar.className = 'dbar';
+      const fill = document.createElement('i');
+      fill.style.width = (it.total > 0 ? Math.min(100, 100 * it.received / it.total) : 12) + '%';
+      bar.appendChild(fill);
+      txt.appendChild(bar);
+    }
+    const act = document.createElement('div');
+    act.className = 'dact';
+    const button = (icon, title, fn, cls) => {
+      const b = document.createElement('button');
+      b.className = 'dbtn' + (cls ? ' ' + cls : '');
+      b.title = title;
+      b.innerHTML = icon;
+      b.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+      b.onclick = e => { e.stopPropagation(); fn(b); };
+      act.appendChild(b);
+      return b;
+    };
+    if (it.state === 0) {
+      button(it.paused ? ICON.play : ICON.pause, it.paused ? 'Продолжить' : 'Пауза', () => send({cmd: 'dl', text: it.paused ? 'resume' : 'pause', id: it.id}));
+      button(ICON.x, 'Отменить', () => send({cmd: 'dl', text: 'cancel', id: it.id}));
+    } else {
+      button(ICON.more, 'Ещё', b => (dmenuFor && dmenuFor.id === it.id) ? closeDmenu() : openDmenu(it, b), 'hov');
+    }
+    row.append(fileIcon(it.ext), txt, act);
+    row.addEventListener('click', () => { if (it.state === 1 && it.exists) send({cmd: 'dl', text: 'open', id: it.id}); });
+    row.addEventListener('contextmenu', e => { e.preventDefault(); openDmenu(it, {getBoundingClientRect: () => ({left: e.clientX, right: e.clientX, bottom: e.clientY}), classList: {add() {}, remove() {}}}); });
+    list.appendChild(row);
+  }
+  if (!items.length) {
+    const e = document.createElement('div');
+    e.className = 'dempty';
+    e.textContent = 'Загрузок пока нет';
+    list.appendChild(e);
+  }
+  $('dfoot').hidden = !items.some(x => x.state !== 0);
+}
+function openDmenu(it, anchor) {
+  closeDmenu();
+  dmenuFor = {id: it.id, anchor};
+  anchor.classList.add('on');
+  const done = it.state === 1 && it.exists, ext = (it.ext || '').toUpperCase();
+  const rows = [];
+  if (it.state === 0) {
+    rows.push([it.paused ? 'Продолжить' : 'Пауза', it.paused ? 'resume' : 'pause'], ['Отменить', 'cancel'], null);
+  } else {
+    rows.push(['Открыть', 'open', !done], ['Показать в папке', 'show', !done]);
+    if (ext) rows.push([`Открывать ${ext} автоматически`, 'auto', false, it.auto]);
+    rows.push(null);
+  }
+  rows.push(['Копировать ссылку', 'copy'], ['Перейти к источнику файла', 'source']);
+  if (it.state !== 0) rows.push(['Скачать заново', 'retry'], null, ['Убрать из списка', 'remove'], ['Удалить файл', 'delete', !done]);
+  dmenu.textContent = '';
+  for (const r of rows) {
+    if (!r) { const sep = document.createElement('div'); sep.className = 'sep'; dmenu.appendChild(sep); continue; }
+    const [label, action, off, on] = r;
+    const m = document.createElement('div');
+    m.className = 'mi' + (off ? ' off' : '') + (on ? ' on' : '') + (action === 'delete' ? ' del' : '');
+    m.textContent = label;
+    if (action === 'auto') m.insertAdjacentHTML('beforeend', '<svg class="ck" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg>');
+    m.onclick = () => {
+      closeDmenu();
+      if (action === 'copy') copyText(it.url);
+      else send({cmd: 'dl', text: action, id: it.id});
+    };
+    dmenu.appendChild(m);
+  }
+  dmenu.hidden = false;
+  const r = anchor.getBoundingClientRect(), top = panel.getBoundingClientRect().top;
+  dmenu.style.left = Math.max(8, Math.min(r.right - dmenu.offsetWidth, innerWidth - dmenu.offsetWidth - 8)) + 'px';
+  dmenu.style.top = Math.min(r.bottom - top + 4, panel.clientHeight - dmenu.offsetHeight - 8) + 'px';
+  sendClip();
+}
+function closeDmenu() {
+  if (dmenuFor && dmenuFor.anchor) dmenuFor.anchor.classList.remove('on');
+  dmenuFor = null;
+  dmenu.hidden = true;
+  sendClip();
+}
+dmenu.addEventListener('mousedown', e => e.preventDefault());
+
+// ---- spaces panel (Yandex-style: count badge, name, "⋮" menu)
+let spaces = {spaces: [], current: 0};
+const smenu = $('smenu');
+let menuFor = null;
+
+// Space badge: its emoji icon if set, otherwise the tab count.
+function badge(s) {
+  const c = document.createElement('span');
+  c.className = 'cnt' + (s.icon ? ' ic' : '');
+  c.textContent = s.icon || s.count;
+  return c;
+}
+
+const ICONS = ['🏠', '💼', '🎮', '🎵', '🎬', '📺', '📚', '🎓', '💻', '🛠️', '🧪', '🎨',
+               '🛒', '💰', '💬', '✈️', '⚽', '🍿', '🐱', '🔥', '⭐', '❤️', '🌙'];
+
+function renderSpaces(d) {
+  spaces = d;
+  closeMenu();
+  const list = $('slist');
+  list.textContent = '';
+  for (const s of d.spaces || []) {
+    const row = document.createElement('div');
+    row.className = 'srow' + (s.id === d.current ? ' cur' : '');
+    row.style.setProperty('--c', s.color);
+    row.title = `${s.count} ${plural(s.count, 'вкладка', 'вкладки', 'вкладок')}`;
+    const nm = document.createElement('span');
+    nm.className = 'snm';
+    nm.textContent = s.name;
+    const dots = document.createElement('button');
+    dots.className = 'sdots';
+    dots.title = 'Ещё';
+    dots.innerHTML = '<svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>';
+    row.append(badge(s), nm);
+    if (s.icon) {
+      const cnt = document.createElement('span');
+      cnt.className = 'scnt';
+      cnt.textContent = s.count;
+      row.append(cnt);
+    }
+    row.append(dots);
+    row.addEventListener('mousedown', e => {
+      if (e.button !== 0 || e.target.closest('button,input')) return;
+      e.preventDefault();
+      if (s.id === d.current) closePanel(); else { panelGone(); send({cmd: 'spaceGo', id: s.id}); }
+    });
+    dots.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+    dots.onclick = () => (menuFor && menuFor.s.id === s.id) ? closeMenu() : openMenu(s, row, nm, dots);
+    list.appendChild(row);
+  }
+  $('sadd').hidden = false;
+}
+
+function openMenu(s, row, nm, dots) {
+  closeMenu();
+  menuFor = {s, row, nm, dots};
+  dots.classList.add('on');
+  // Icon: an emoji, or the tab count ("no icon").
+  const ic = smenu.querySelector('.mic');
+  ic.textContent = '';
+  ic.style.setProperty('--c', s.color);
+  const iconBtn = (val, label, cls) => {
+    const b = document.createElement('button');
+    b.className = (cls || '') + ((s.icon || '') === val ? ' on' : '');
+    b.textContent = label;
+    b.title = val ? 'Иконка' : 'Без иконки: число вкладок';
+    b.onclick = () => {
+      s.icon = val;
+      ic.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+      row.querySelector('.cnt').replaceWith(badge(s));
+      send({cmd: 'spaceIcon', id: s.id, text: val});
+    };
+    ic.appendChild(b);
+  };
+  iconBtn('', String(s.count), 'num');
+  for (const e of ICONS) iconBtn(e, e);
+  const sw = smenu.querySelector('.msw');
+  sw.textContent = '';
+  for (const c of COLORS) {
+    const b = document.createElement('button');
+    b.style.setProperty('--c', c);
+    b.className = c === s.color ? 'on' : '';
+    b.title = 'Цвет';
+    b.onclick = () => {
+      s.color = c;
+      row.style.setProperty('--c', c);
+      sw.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+      send({cmd: 'spaceColor', id: s.id, text: c});
+    };
+    sw.appendChild(b);
+  }
+  smenu.querySelector('.del').hidden = (spaces.spaces || []).length < 2;
+  smenu.hidden = false;
+  const r = dots.getBoundingClientRect(), top = panel.getBoundingClientRect().top;
+  smenu.style.left = Math.max(8, r.right - smenu.offsetWidth) + 'px';
+  smenu.style.top = (r.bottom - top + 4) + 'px';
+}
+
+function closeMenu() {
+  if (menuFor) menuFor.dots.classList.remove('on');
+  menuFor = null;
+  smenu.hidden = true;
+}
+
+smenu.addEventListener('mousedown', e => e.preventDefault());
+smenu.querySelector('[data-a="rename"]').onclick = () => {
+  const m = menuFor;
+  closeMenu();
+  if (m) editName(m.row, m.nm, m.s.name, name => send({cmd: 'spaceRename', id: m.s.id, text: name}));
+};
+smenu.querySelector('[data-a="del"]').onclick = () => {
+  const m = menuFor;
+  closeMenu();
+  if (m) send({cmd: 'spaceDel', id: m.s.id});
+};
+
+// Inline name editor; `done(name)` on Enter, restores on Escape/blur.
+function editName(row, label, value, done) {
+  const input = document.createElement('input');
+  input.value = value;
+  input.maxLength = 40;
+  label.replaceWith(input);
+  input.focus();
+  input.select();
+  let finished = false;
+  const finish = ok => {
+    if (finished) return;
+    finished = true;
+    if (ok && input.value.trim()) done(input.value.trim());
+    else input.replaceWith(label);
+  };
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(false));
+}
+
+$('sadd').addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  closeMenu();
+  const n = (spaces.spaces || []).length;
+  const s = {count: 0, color: COLORS[n % COLORS.length]};
+  const row = document.createElement('div');
+  row.className = 'srow';
+  row.style.setProperty('--c', s.color);
+  const label = document.createElement('span');
+  row.append(badge(s), label);
+  $('slist').appendChild(row);
+  $('sadd').hidden = true;
+  editName(row, label, `Пространство ${n + 1}`, name => {
+    panelGone();
+    send({cmd: 'spaceNew', text: name, url: s.color});
+  });
+  // Escape/blur on an unsaved new row removes it.
+  const input = row.querySelector('input');
+  const discard = () => { row.remove(); $('sadd').hidden = false; };
+  input.addEventListener('blur', () => setTimeout(() => { if (!row.querySelector('input')) discard(); }, 0));
+  input.addEventListener('keydown', e => { if (e.key === 'Escape') discard(); });
+});
+
+// ------------------------------------------------------------- misc
+document.addEventListener('contextmenu', e => { if (!e.target.closest('input')) e.preventDefault(); });
+document.addEventListener('mousedown', e => {
+  if (e.button === 0 && !omni.contains(e.target) && document.activeElement === url) url.blur();
+});
+
+send({cmd: 'ready'});
+})();
+</script>
+</body>
+</html>
