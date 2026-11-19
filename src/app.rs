@@ -2,7 +2,7 @@
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::Path,
     rc::Rc,
     sync::atomic::Ordering,
@@ -165,7 +165,29 @@ struct Tab {
     /// The page's text is mostly not Russian: offer to translate it.
     foreign: bool,
     shared: Rc<TabShared>,
+    /// Back / forward history around the page (URLs, oldest first), refreshed after
+    /// every navigation; a new webview for the tab rebuilds it (see `replay_plan`).
+    back: Vec<String>,
+    fwd: Vec<String>,
+    /// Steps left while a new webview rebuilds that history.
+    replay: VecDeque<Replay>,
 }
+
+/// One step of rebuilding a tab's history in a new webview.
+#[derive(Debug)]
+enum Replay {
+    /// Load a stand-in entry (`tab::hold_url`).
+    Hold(String),
+    /// Load the tab's own page.
+    Page,
+    /// `history.go(n)`: back from the forward entries to the page's stand-in, which then loads it.
+    Go(i32),
+}
+
+/// History entries kept around a tab's page. Each one costs a stand-in load
+/// when the history is rebuilt, before the page itself starts loading.
+const MAX_BACK: usize = 10;
+const MAX_FWD: usize = 5;
 
 impl Tab {
     fn new(id: u32, space: u32, url: &str, private: bool) -> Self {
@@ -190,7 +212,34 @@ impl Tab {
             fresh: false,
             foreign: false,
             shared: Rc::new(TabShared::default()),
+            back: Vec::new(),
+            fwd: Vec::new(),
+            replay: VecDeque::new(),
         }
+    }
+
+    /// A stand-in history entry is (still) up instead of the tab's page: its
+    /// title, icon and URL are not the page's.
+    fn holding(&self) -> bool {
+        !self.replay.is_empty() || self.view.as_ref().and_then(|v| v.url().ok()).is_some_and(|u| tab::is_hold(&u))
+    }
+
+    /// How a new webview gets the tab's history back: a stand-in entry for each
+    /// earlier page, then the page itself. With forward entries the page is a
+    /// stand-in too, followed by the forward ones and a jump back to it.
+    fn replay_plan(&self) -> VecDeque<Replay> {
+        let mut plan: VecDeque<Replay> = self.back.iter().map(|u| Replay::Hold(tab::hold_url(u))).collect();
+        // Only a web page can stand in for itself (internal pages drop their forward entries).
+        if self.fwd.is_empty() || self.internal.is_some() || !self.url.starts_with("http") {
+            if !plan.is_empty() {
+                plan.push_back(Replay::Page);
+            }
+        } else {
+            plan.push_back(Replay::Hold(tab::hold_url(&self.url)));
+            plan.extend(self.fwd.iter().map(|u| Replay::Hold(tab::hold_url(u))));
+            plan.push_back(Replay::Go(-(self.fwd.len() as i32)));
+        }
+        plan
     }
 
     fn display_title(&self) -> String {
@@ -520,6 +569,8 @@ impl App {
                 t.title = st.title.clone();
                 t.icon = st.icon.clone();
                 t.pinned = st.pinned;
+                t.back = st.back.clone();
+                t.fwd = st.fwd.clone();
                 app.tabs.push(t);
                 if i == ss.active.min(ss.tabs.len().saturating_sub(1)) {
                     active = id;
@@ -1391,9 +1442,12 @@ impl App {
             return;
         }
         let (id, private, internal) = (self.tabs[idx].id, self.tabs[idx].private, self.tabs[idx].internal);
-        let source = match internal {
-            Some(k) => Source::Html(self.internal_html(k, private)),
-            None => Source::Url(self.tabs[idx].url.clone()),
+        // The history it had (reopened / woken / restored tab) is rebuilt first.
+        let mut replay = self.tabs[idx].replay_plan();
+        let source = match (replay.pop_front(), internal) {
+            (Some(Replay::Hold(u)), _) => Source::Url(u),
+            (_, Some(k)) => Source::Html(self.internal_html(k, private)),
+            (_, None) => Source::Url(self.tabs[idx].url.clone()),
         };
         let spec = Spec {
             id,
@@ -1411,6 +1465,7 @@ impl App {
                 }
                 self.tabs[idx].view = Some(view);
                 self.tabs[idx].fresh = true;
+                self.tabs[idx].replay = replay;
                 // Re-stack explicitly: creation order alone does not settle the
                 // compositor's layer order, and the chrome could show through.
                 self.stack_ui(self.ui_should_be_on_top());
@@ -1566,7 +1621,14 @@ impl App {
         let pos = self.visible().iter().position(|&g| g == idx);
         let t = self.tabs.remove(idx);
         if !t.private && t.internal != Some(Internal::NewTab) {
-            self.closed.push(SessionTab { url: t.session_url(), title: t.title.clone(), ..Default::default() });
+            self.closed.push(SessionTab {
+                url: t.session_url(),
+                title: t.title.clone(),
+                icon: t.icon.clone(),
+                back: t.back.clone(),
+                fwd: t.fwd.clone(),
+                ..Default::default()
+            });
             if self.closed.len() > 30 {
                 self.closed.remove(0);
             }
@@ -1604,6 +1666,7 @@ impl App {
         let internal = Internal::from_url(&url);
         {
             let t = &mut self.tabs[idx];
+            t.replay.clear();
             t.internal = internal;
             t.url = if internal.is_some() { String::new() } else { url.clone() };
             if internal.is_some() {
@@ -1629,6 +1692,9 @@ impl App {
         let Some(idx) = self.active_idx() else { return };
         if self.recover_reload(idx) {
             return;
+        }
+        if !self.tabs[idx].replay.is_empty() {
+            return; // the page is still on its way
         }
         let t = &self.tabs[idx];
         let Some(v) = &t.view else { return };
@@ -1674,10 +1740,73 @@ impl App {
         self.ui_dirty = true;
     }
 
+    /// The user navigates the active tab: a history rebuild in progress stops there.
+    fn stop_replay(&mut self) {
+        if let Some(i) = self.active_idx() {
+            self.tabs[i].replay.clear();
+        }
+    }
+
+    /// A stand-in history entry finished loading: start the next step of the
+    /// rebuild. False when no history is being rebuilt.
+    fn replay_next(&mut self, i: usize) -> bool {
+        let Some(step) = self.tabs[i].replay.pop_front() else { return false };
+        let t = &self.tabs[i];
+        let Some(v) = &t.view else { return false };
+        let _ = match step {
+            Replay::Hold(u) => v.load_url(&u),
+            Replay::Page => match t.internal {
+                Some(k) => v.load_html(&self.internal_html(k, t.private)),
+                None => v.load_url(&t.url),
+            },
+            Replay::Go(n) => v.evaluate_script(&format!("history.go({n})")),
+        };
+        true
+    }
+
+    /// The back/forward list of a tab's webview (CDP JSON) arrived: remember it.
+    fn nav_list(&mut self, id: u32, json: &str) {
+        #[derive(Deserialize)]
+        struct Entry {
+            url: String,
+        }
+        #[derive(Deserialize)]
+        struct List {
+            #[serde(rename = "currentIndex")]
+            current: usize,
+            entries: Vec<Entry>,
+        }
+        let Some(i) = self.idx(id) else { return };
+        // Mid-rebuild the list is partial; the one remembered is still the whole.
+        let Ok(list) = serde_json::from_str::<List>(json) else { return };
+        if !self.tabs[i].replay.is_empty() || list.current >= list.entries.len() {
+            return;
+        }
+        // Stand-ins count as the pages they stand for; internal pages and the like are skipped.
+        let web = |e: &Entry| Some(tab::hold_target(&e.url).unwrap_or_else(|| e.url.clone())).filter(|u| u.starts_with("http"));
+        let mut back: Vec<String> = list.entries[..list.current].iter().filter_map(web).collect();
+        back.drain(..back.len().saturating_sub(MAX_BACK));
+        let fwd: Vec<String> = list.entries[list.current + 1..].iter().filter_map(web).take(MAX_FWD).collect();
+        let t = &mut self.tabs[i];
+        if t.back != back || t.fwd != fwd {
+            (t.back, t.fwd) = (back, fwd);
+            self.session_dirty = true;
+        }
+    }
+
+    /// Refreshes a tab's remembered back/forward list (answer: `UserEvent::NavList`).
+    fn query_nav(&self, id: u32) {
+        let Some(i) = self.idx(id) else { return };
+        if let Some(v) = self.tabs[i].view.as_ref().filter(|_| self.tabs[i].replay.is_empty()) {
+            tab::query_history(v, id, &self.proxy);
+        }
+    }
+
     fn sleep_tab(&mut self, i: usize) {
         let t = &mut self.tabs[i];
         if t.id != self.active && t.view.is_some() {
             t.view = None;
+            t.replay.clear();
             t.loading = false;
             t.audio = false;
             self.ui_dirty = true;
@@ -2064,6 +2193,9 @@ impl App {
         match ev {
             UserEvent::Title(id, title) => {
                 if let Some(i) = self.idx(id) {
+                    if self.tabs[i].holding() {
+                        return;
+                    }
                     let t = &mut self.tabs[i];
                     t.title = title;
                     if !t.private && t.internal.is_none() {
@@ -2084,12 +2216,19 @@ impl App {
                     s.committed |= url.starts_with("http");
                 } else {
                     self.sync_url(id);
+                    self.query_nav(id);
                 }
             }
             UserEvent::Load(id, started) => {
                 if let Some(i) = self.idx(id) {
-                    self.tabs[i].loading = started;
-                    if !started {
+                    if !started && self.replay_next(i) {
+                        // A stand-in history entry is in; the next step is on its way.
+                    } else if self.tabs[i].holding() {
+                        self.tabs[i].loading = true; // a stand-in on its way to its page
+                    } else {
+                        self.tabs[i].loading = started;
+                    }
+                    if !started && !self.tabs[i].holding() {
                         let t = &mut self.tabs[i];
                         if t.fresh {
                             t.fresh = false;
@@ -2113,9 +2252,16 @@ impl App {
                     }
                 }
             }
-            UserEvent::Nav(id) => self.ui_dirty |= id == self.active,
+            UserEvent::Nav(id) => {
+                self.ui_dirty |= id == self.active;
+                self.query_nav(id);
+            }
+            UserEvent::NavList(id, json) => self.nav_list(id, &json),
             UserEvent::Favicon(id, url) => {
                 if let Some(i) = self.idx(id) {
+                    if self.tabs[i].holding() {
+                        return;
+                    }
                     self.tabs[i].icon = url;
                     self.ui_dirty = true;
                 } else if let Some(t) = self.spare_tab(id) {
@@ -2324,7 +2470,7 @@ impl App {
         let Some(i) = self.idx(id) else { return };
         let t = &mut self.tabs[i];
         let Some(Ok(url)) = t.view.as_ref().map(|v| v.url()) else { return };
-        if url == "about:blank" || url.is_empty() {
+        if url == "about:blank" || url.is_empty() || tab::is_hold(&url) {
             return;
         }
         if t.url != url {
@@ -2359,7 +2505,13 @@ impl App {
             Cmd::Reopen => {
                 if let Some(st) = self.closed.pop() {
                     let after = self.active_idx();
-                    self.open(&st.url, after, false, true);
+                    let id = self.open(&st.url, after, false, false);
+                    if let Some(i) = self.idx(id) {
+                        let t = &mut self.tabs[i];
+                        (t.title, t.icon, t.back, t.fwd) = (st.title, st.icon, st.back, st.fwd);
+                    }
+                    self.ui_focus = false;
+                    self.activate(id);
                 }
             }
             Cmd::Next => self.cycle(1),
@@ -2382,11 +2534,13 @@ impl App {
             }
             Cmd::Reload => self.reload(),
             Cmd::Back => {
+                self.stop_replay();
                 if let Some(v) = self.active_view() {
                     let _ = v.go_back();
                 }
             }
             Cmd::Forward => {
+                self.stop_replay();
                 if let Some(v) = self.active_view() {
                     let _ = v.go_forward();
                 }
@@ -2835,6 +2989,8 @@ impl App {
                         title: t.title.clone(),
                         pinned: t.pinned,
                         icon: if t.icon.starts_with("http") { t.icon.clone() } else { String::new() },
+                        back: t.back.clone(),
+                        fwd: t.fwd.clone(),
                     })
                     .collect(),
             });

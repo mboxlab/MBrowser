@@ -176,6 +176,12 @@ pub struct SessionTab {
     pub pinned: bool,
     /// Favicon URL, so restored (sleeping) tabs show their icon right away.
     pub icon: String,
+    /// Back / forward history around `url` (oldest first), rebuilt when the tab
+    /// gets a webview again.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub back: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fwd: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]

@@ -14,7 +14,8 @@ use std::{
 use tao::{event_loop::EventLoopProxy, window::Window};
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
-    BytesReceivedChangedEventHandler, CapturePreviewCompletedHandler, ContainsFullScreenElementChangedEventHandler,
+    BytesReceivedChangedEventHandler, CallDevToolsProtocolMethodCompletedHandler, CapturePreviewCompletedHandler,
+    ContainsFullScreenElementChangedEventHandler,
     ContentLoadingEventHandler, DownloadStartingEventHandler, ExecuteScriptCompletedHandler,
     FaviconChangedEventHandler, HistoryChangedEventHandler, IsDocumentPlayingAudioChangedEventHandler,
     StateChangedEventHandler, Microsoft::Web::WebView2::Win32::*, NavigationStartingEventHandler,
@@ -41,6 +42,86 @@ use crate::blocker::{BlockCtx, Verdict, host_of};
 /// Injected into every web page before its own scripts: cosmetic filtering,
 /// SponsorBlock, page translation (see content.js).
 const CONTENT_JS: &str = include_str!("content.js");
+
+/// Stand-in history entries. WebView2 cannot be handed a back/forward list, so
+/// a fresh webview (reopened, woken or restored tab) gets one stand-in page per
+/// earlier entry before its own page. Loaded by us it stays blank; reached with
+/// Back / Forward it replaces itself with the page it stands for. Served from
+/// memory (see `serve_hold`), never from the network.
+const HOLD_PREFIX: &str = "https://mb-restore.localhost/?u=";
+const HOLD_HTML: &str = r#"<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer">
+<link rel="icon" href="data:,"><title></title><script>
+(()=>{const u=new URLSearchParams(location.search).get('u')||'';
+const go=()=>{if(/^https?:\/\//i.test(u))location.replace(u)};
+const n=performance.getEntriesByType('navigation')[0];
+if(n&&n.type!=='navigate')go();
+addEventListener('pageshow',e=>{if(e.persisted)go()});})();
+</script>"#;
+
+/// Stand-in history entry for `url`.
+pub fn hold_url(url: &str) -> String {
+    format!("{HOLD_PREFIX}{}", crate::store::encode_query(url))
+}
+
+pub fn is_hold(url: &str) -> bool {
+    url.starts_with(HOLD_PREFIX)
+}
+
+/// The page a stand-in entry stands for.
+pub fn hold_target(url: &str) -> Option<String> {
+    let b = url.strip_prefix(HOLD_PREFIX)?.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b
+            .get(i + 1..i + 3)
+            .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
+        match (b[i], hex) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(if c == b'+' { b' ' } else { c });
+                i += 1;
+            }
+        }
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Answers a stand-in entry's request from memory. False for any other request.
+unsafe fn serve_hold(
+    env: &ICoreWebView2Environment,
+    args: &ICoreWebView2WebResourceRequestedEventArgs,
+) -> windows::core::Result<bool> {
+    unsafe {
+        let mut uri = PWSTR::null();
+        args.Request()?.Uri(&mut uri)?;
+        if !is_hold(&take_pwstr(uri)) {
+            return Ok(false);
+        }
+        let stream = SHCreateMemStream(Some(HOLD_HTML.as_bytes()));
+        let headers = w!("Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store");
+        args.SetResponse(&env.CreateWebResourceResponse(stream.as_ref(), 200, w!("OK"), headers)?)?;
+        Ok(true)
+    }
+}
+
+/// Asks for the tab's back/forward list; it arrives as `UserEvent::NavList`.
+pub fn query_history(view: &WebView, id: u32, proxy: &Proxy) {
+    let p = proxy.clone();
+    let done = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |res, json| {
+        if res.is_ok() {
+            let _ = p.send_event(UserEvent::NavList(id, json));
+        }
+        Ok(())
+    }));
+    unsafe {
+        let _ = view.webview().CallDevToolsProtocolMethod(w!("Page.getNavigationHistory"), w!("{}"), &done);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Cmd {
@@ -72,6 +153,8 @@ pub enum UserEvent {
     Url(u32),
     Load(u32, bool),
     Nav(u32),
+    /// A tab's back/forward list: CDP `Page.getNavigationHistory` JSON.
+    NavList(u32, String),
     Favicon(u32, String),
     Audio(u32, bool),
     Fullscreen(u32, bool),
@@ -655,11 +738,14 @@ unsafe fn hook_content(
         core.add_WebResourceRequested(
             &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
+                let mut ctx = COREWEBVIEW2_WEB_RESOURCE_CONTEXT::default();
+                args.ResourceContext(&mut ctx)?;
+                if ctx == COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT && serve_hold(&env, &args)? {
+                    return Ok(());
+                }
                 if !block.enabled.get() || shared.bypass.get() {
                     return Ok(());
                 }
-                let mut ctx = COREWEBVIEW2_WEB_RESOURCE_CONTEXT::default();
-                args.ResourceContext(&mut ctx)?;
                 // Audio/video segments never carry ads by themselves (their manifests do).
                 if ctx == COREWEBVIEW2_WEB_RESOURCE_CONTEXT_MEDIA {
                     return Ok(());
@@ -740,7 +826,7 @@ static SCRIPT_KEY: LazyLock<String> = LazyLock::new(|| {
 /// content.js with its cosmetic rules. Scriptlets are a separate script, so a
 /// broken one cannot take the rest down. Empty for non-web pages.
 fn page_scripts(block: &BlockCtx, shared: &TabShared, url: &str) -> Vec<String> {
-    let Some(host) = host_of(url).map(|h| h.to_ascii_lowercase()) else {
+    let Some(host) = host_of(url).filter(|_| !is_hold(url)).map(|h| h.to_ascii_lowercase()) else {
         shared.cos_exceptions.borrow_mut().clear();
         return Vec::new();
     };
@@ -844,6 +930,18 @@ mod tests {
         for (i, o) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foobar", "Zm9vYmFy")] {
             assert_eq!(super::base64(i.as_bytes()), o);
         }
+    }
+
+    #[test]
+    fn hold_url_round_trips() {
+        for u in ["https://x.ru/a b?q=1+2&r=%2F#f", "https://пример.рф/путь?з=я", "http://h/"] {
+            let h = super::hold_url(u);
+            assert!(super::is_hold(&h));
+            assert_eq!(super::hold_target(&h).as_deref(), Some(u));
+        }
+        assert_eq!(super::hold_target("https://x.ru/"), None);
+        // Broken escapes are kept as they are.
+        assert_eq!(super::hold_target("https://mb-restore.localhost/?u=a%zz%4").as_deref(), Some("a%zz%4"));
     }
 }
 
