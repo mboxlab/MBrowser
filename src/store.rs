@@ -106,6 +106,8 @@ pub struct Settings {
     /// Experimental: live blur under the Tablo (Windows acrylic window). Off:
     /// it misbehaves (blurs the desktop after some open/close cycles).
     pub live_blur: bool,
+    /// New versions come from the GitHub releases by themselves (update.rs).
+    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -127,6 +129,7 @@ impl Default for Settings {
             tablo_size: "large".into(),
             tablo_width: "auto".into(),
             live_blur: false,
+            auto_update: true,
         }
     }
 }
@@ -248,6 +251,14 @@ const HISTORY_KEEP: usize = 15_000;
 impl History {
     pub fn load() -> Self {
         let entries: Vec<HistEntry> = load("history.json");
+        let mut h = Self { entries, index: HashMap::new(), dirty: false };
+        h.reindex();
+        h
+    }
+
+    /// A history that never touches the disk (tests).
+    #[cfg(test)]
+    pub fn from_entries(entries: Vec<HistEntry>) -> Self {
         let mut h = Self { entries, index: HashMap::new(), dirty: false };
         h.reindex();
         h
@@ -413,6 +424,13 @@ pub struct DownloadItem {
     pub private: bool,
     #[serde(skip)]
     pub paused: bool,
+    /// Tab (webview) the download runs in; 0 for entries loaded from disk.
+    #[serde(skip)]
+    pub tab: u32,
+    /// The file is on disk: checked when the list opens and when the download
+    /// ends, not on every progress update.
+    #[serde(skip)]
+    pub exists: bool,
 }
 
 pub fn load_downloads() -> Vec<DownloadItem> {

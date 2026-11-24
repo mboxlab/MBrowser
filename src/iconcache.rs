@@ -24,13 +24,21 @@ pub struct IconCache {
     dir: PathBuf,
     data: HashMap<String, String>,
     fetching: HashSet<String>,
+    /// Sites with no file on disk: `peek` runs for every tab on every UI update,
+    /// so a miss must not mean another disk read. Forgotten when an icon arrives.
+    missing: HashSet<String>,
 }
 
 impl IconCache {
     pub fn new() -> Self {
         let dir = store::cache_dir().join("Icons");
         let _ = fs::create_dir_all(&dir);
-        Self { dir, data: HashMap::new(), fetching: HashSet::new() }
+        Self { dir, data: HashMap::new(), fetching: HashSet::new(), missing: HashSet::new() }
+    }
+
+    /// An icon download finished (`UserEvent::IconCached`): look at the disk again.
+    pub fn arrived(&mut self) {
+        self.missing.clear();
     }
 
     fn file(&self, site: &str) -> PathBuf {
@@ -43,7 +51,13 @@ impl IconCache {
         if let Some(d) = self.data.get(site) {
             return Some(d.clone());
         }
-        let url = data_url(&fs::read(self.file(site)).ok()?)?;
+        if self.missing.contains(site) {
+            return None;
+        }
+        let Some(url) = fs::read(self.file(site)).ok().and_then(|b| data_url(&b)) else {
+            self.missing.insert(site.to_string());
+            return None;
+        };
         self.data.insert(site.to_string(), url.clone());
         Some(url)
     }
@@ -69,6 +83,7 @@ impl IconCache {
     pub fn invalidate(&mut self, site: &str) {
         self.data.remove(site);
         self.fetching.remove(site);
+        self.missing.remove(site);
         let _ = fs::remove_file(self.file(site));
     }
 }

@@ -176,6 +176,7 @@ pub fn set_setting(s: &mut Settings, key: &str, v: &Value) -> Option<Effect> {
             s.sleep_minutes = n;
         }
         "restore_session" => s.restore_session = flag?,
+        "auto_update" => s.auto_update = flag?,
         "translate_to" => {
             let t = text?;
             if !crate::translate::valid_lang(t) {
@@ -215,7 +216,7 @@ pub fn settings_json(s: &Settings) -> Value {
         "tracking_prevention": s.tracking_prevention, "sleep_minutes": s.sleep_minutes,
         "restore_session": s.restore_session, "translate_to": s.translate_to,
         "sponsorblock": s.sponsorblock, "sponsorblock_categories": s.sponsorblock_categories,
-        "tablo_size": s.tablo_size, "tablo_width": s.tablo_width,
+        "tablo_size": s.tablo_size, "tablo_width": s.tablo_width, "auto_update": s.auto_update,
     })
 }
 
@@ -490,6 +491,9 @@ sec('SponsorBlock на YouTube',
 sec('Табло',
   sel('tablo_size','Размер плиток','',[['small','Маленькие'],['medium','Средние'],['large','Большие']]),
   sel('tablo_width','Ширина Табло','',[['auto','По ширине окна'],['small','Узкое'],['medium','Среднее'],['large','Широкое']]));
+sec('Обновления',
+  sw('auto_update','Обновляться автоматически','Новые версии приходят с GitHub и ставятся при следующем запуске'),
+  h('div',{class:'item'},label('Версия '+DATA.about.version,'Проверить, нет ли новой'),h('button',{class:'b',onclick:()=>{send({a:'update_check'});toast('Проверяем…')}},'Проверить сейчас')));
 sec('Данные',
   h('div',{class:'item'},label('Папка данных','Настройки, закладки, история, сессия'),h('button',{class:'b',onclick:()=>send({a:'open_data'})},'Открыть папку')),
   h('div',{class:'item'},label('Закладки','Список, поиск, переименование и порядок'),h('button',{class:'b',onclick:()=>send({a:'open_bookmarks'})},'Открыть')));
@@ -500,6 +504,7 @@ function apply(s){for(const k in ctl)ctl[k](s[k])}
 apply(S);
 if(wv)wv.addEventListener('message',e=>{
   const m=e.data;if(!m||m.mb!=='int')return;
+  if(typeof m.upd==='string'){toast(m.upd,!!m.err);return}
   if(m.s)apply(m.s);
   toast(m.ok?'Сохранено':'Не удалось сохранить',!m.ok);
 });

@@ -557,3 +557,173 @@ function translator() {
   if (document.readyState === 'complete') setTimeout(report, 300);
   else window.addEventListener('load', () => setTimeout(report, 300), { once: true });
 }
+
+// ------------------------------------------------------------------ selection translation
+// "Перевести «…»" in the context menu: a bubble by the selected text says
+// "Перевожу…" at once and gets the translation from the browser a moment later.
+// { mb: 'tsel', id, x, y } opens it (x, y: the click, webview pixels);
+// { mb: 'tsel', id, r, from, to } or { …, err } fills it.
+
+if (wv) selectionBubble();
+
+function selectionBubble() {
+  const SVG = 'http://www.w3.org/2000/svg';
+  const icon = paths => {
+    const s = document.createElementNS(SVG, 'svg');
+    s.setAttribute('viewBox', '0 0 24 24');
+    for (const d of paths) {
+      const p = document.createElementNS(SVG, 'path');
+      p.setAttribute('d', d);
+      s.append(p);
+    }
+    return s;
+  };
+  const COPY = ['M9 9h10v11H9z', 'M5 15V4h10'], DONE = ['M5 12.5l4.5 4.5L19 7'], CLOSE = ['M6 6l12 12M18 6L6 18'];
+  let names = null;
+  try { names = new Intl.DisplayNames(['ru'], { type: 'language' }); } catch (e) {}
+  const langName = c => { try { return (c && names && names.of(c)) || ''; } catch (e) { return ''; } };
+
+  let host = null, ui = null, cur = 0, range = null, point = null, text = '', raf = 0, doneTimer = 0;
+
+  function build() {
+    host = document.createElement('div');
+    host.style.cssText = 'all:initial;position:fixed;left:0;top:0;z-index:2147483647';
+    const root = host.attachShadow({ mode: 'closed' });
+    const st = document.createElement('style');
+    st.textContent = `
+      .card{box-sizing:border-box;width:min(420px,calc(100vw - 16px));max-height:min(50vh,440px);display:flex;flex-direction:column;
+        background:#1c1d22;color:#e9e9ee;border:1px solid rgba(255,255,255,.09);border-radius:12px;overflow:hidden;
+        box-shadow:0 14px 36px rgba(0,0,0,.34),0 2px 8px rgba(0,0,0,.24);
+        font:14px/1.5 "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;animation:in .14s ease-out}
+      @keyframes in{from{opacity:0;transform:translateY(-4px)}}
+      .head{display:flex;align-items:center;gap:2px;padding:6px 6px 0 14px;color:#9a9ca6;font-size:12px}
+      .ttl{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      button{all:unset;cursor:pointer;display:grid;place-items:center;width:28px;height:28px;border-radius:7px;color:#9a9ca6;flex:none}
+      button:hover{background:rgba(255,255,255,.08);color:#e9e9ee}
+      button:focus-visible{outline:2px solid #8a96ff;outline-offset:-2px}
+      button[hidden]{display:none}
+      svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+      .done{color:#5ec8a0}
+      .body{padding:4px 14px 12px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;cursor:text}
+      .wait{color:#9a9ca6}
+      .err{color:#ef8f8f}`;
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-label', 'Перевод');
+    const head = document.createElement('div');
+    head.className = 'head';
+    const title = document.createElement('span');
+    title.className = 'ttl';
+    const button = (label, paths, fn) => {
+      const b = document.createElement('button');
+      b.title = label;
+      b.setAttribute('aria-label', label);
+      b.append(icon(paths));
+      b.addEventListener('mousedown', e => e.preventDefault()); // keeps the page's selection
+      b.addEventListener('click', e => { e.stopPropagation(); fn(b); });
+      return b;
+    };
+    const copy = button('Копировать перевод', COPY, b => {
+      const show = () => {
+        b.replaceChildren(icon(DONE));
+        b.classList.add('done');
+        clearTimeout(doneTimer);
+        doneTimer = setTimeout(() => { b.replaceChildren(icon(COPY)); b.classList.remove('done'); }, 1200);
+      };
+      const fallback = () => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;opacity:0';
+        root.append(ta);
+        ta.select();
+        try { if (document.execCommand('copy')) show(); } catch (e) {}
+        ta.remove();
+      };
+      try { navigator.clipboard.writeText(text).then(show, fallback); } catch (e) { fallback(); }
+    });
+    const shut = button('Закрыть (Esc)', CLOSE, close);
+    const body = document.createElement('div');
+    body.className = 'body';
+    head.append(title, copy, shut);
+    card.append(head, body);
+    root.append(st, card);
+    ui = { card, title, body, copy };
+  }
+
+  // The selected text, or the click point when the text is in a frame or a field.
+  const anchor = () => {
+    if (range) {
+      const r = range.getBoundingClientRect();
+      if (r.width || r.height) return r;
+    }
+    return point;
+  };
+  function place() {
+    if (!host || !host.isConnected) return;
+    const r = anchor(), w = ui.card.offsetWidth, h = ui.card.offsetHeight;
+    const vw = document.documentElement.clientWidth || innerWidth, vh = innerHeight;
+    const left = Math.max(8, Math.min(r.left, vw - w - 8));
+    let top = r.bottom + 8;
+    if (top + h > vh - 8 && r.top - h - 8 >= 8) top = r.top - h - 8; // no room below: above it
+    top = Math.max(8, Math.min(top, vh - h - 8));
+    host.style.left = Math.round(left) + 'px';
+    host.style.top = Math.round(top) + 'px';
+  }
+  const follow = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; place(); }); };
+  const onDown = e => { if (host && !e.composedPath().includes(host)) close(); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  function listen(on) {
+    const f = on ? 'addEventListener' : 'removeEventListener';
+    window[f]('mousedown', onDown, true);
+    window[f]('keydown', onKey, true);
+    window[f]('scroll', follow, true);
+    window[f]('resize', follow);
+  }
+  function close() {
+    if (!host || !host.isConnected) return;
+    host.remove();
+    listen(false);
+    cur = 0; range = null; text = '';
+  }
+
+  function open(d) {
+    if (!host) build();
+    cur = d.id;
+    const k = window.devicePixelRatio || 1;
+    point = { left: d.x / k, right: d.x / k, top: d.y / k, bottom: d.y / k };
+    // The top document's selection, if the click was on it (not on a frame's).
+    range = null;
+    const sel = getSelection();
+    if (sel && sel.rangeCount && !sel.isCollapsed) {
+      const r = sel.getRangeAt(0), b = r.getBoundingClientRect(), m = 40;
+      if (b.left - m <= point.left && point.left <= b.right + m && b.top - m <= point.top && point.top <= b.bottom + m) {
+        range = r.cloneRange();
+      }
+    }
+    text = '';
+    ui.title.textContent = 'Перевод';
+    ui.body.className = 'body wait';
+    ui.body.textContent = 'Перевожу…';
+    ui.copy.hidden = true;
+    if (!host.isConnected) { document.documentElement.append(host); listen(true); }
+    place();
+  }
+
+  handlers.tsel = d => {
+    if (!('r' in d) && !('err' in d)) return open(d);
+    if (d.id !== cur || !host) return;
+    if (typeof d.r === 'string') {
+      text = d.r;
+      const from = langName(d.from), to = langName(d.to);
+      ui.title.textContent = from && to ? from[0].toUpperCase() + from.slice(1) + ' → ' + to : to ? 'Перевод: ' + to : 'Перевод';
+      ui.body.className = 'body';
+      ui.body.textContent = d.r;
+      ui.copy.hidden = false;
+    } else {
+      ui.body.className = 'body err';
+      ui.body.textContent = 'Не удалось перевести. Проверьте подключение к интернету.';
+    }
+    place();
+  };
+}

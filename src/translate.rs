@@ -26,6 +26,41 @@ pub fn translate(texts: &[String], to: &str) -> Result<Vec<String>, String> {
     parse(&v, texts.len()).ok_or_else(|| "unexpected answer".into())
 }
 
+/// Translates plain text (a selection) into `to`, keeping its line breaks.
+/// Returns the translation and the detected source language ("en", may be "").
+pub fn translate_text(text: &str, to: &str) -> Result<(String, String), String> {
+    let url = format!("https://translate.googleapis.com/translate_a/t?client=gtx&sl=auto&tl={}&format=text", net::form_encode(to));
+    let r = net::post(
+        &url,
+        &[("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")],
+        format!("q={}", net::form_encode(text)).as_bytes(),
+    )?;
+    if !r.ok() {
+        return Err(format!("HTTP {}", r.status));
+    }
+    let v: Value = serde_json::from_slice(&r.body).map_err(|e| e.to_string())?;
+    parse_one(&v).ok_or_else(|| "unexpected answer".into())
+}
+
+/// One text: `[["текст","en"]]`, `["текст","en"]` or `"текст"`.
+fn parse_one(v: &Value) -> Option<(String, String)> {
+    match v {
+        Value::String(s) => Some((s.clone(), String::new())),
+        Value::Array(a) => match a.first()? {
+            Value::String(s) => Some((s.clone(), a.get(1).and_then(Value::as_str).unwrap_or("").to_string())),
+            inner @ Value::Array(_) => parse_one(inner),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// "en-US" and "en" are the same language here.
+pub fn same_lang(a: &str, b: &str) -> bool {
+    let base = |s: &str| s.split(['-', '_']).next().unwrap_or("").to_ascii_lowercase();
+    !a.is_empty() && base(a) == base(b)
+}
+
 /// The answer's shape depends on the batch: `[["текст","en"], …]` for several
 /// texts with auto-detection, `["текст","en"]` or `"текст"` for one.
 fn parse(v: &Value, n: usize) -> Option<Vec<String>> {
@@ -62,6 +97,26 @@ mod tests {
         assert_eq!(p(&json!(["А", "Б"]), 2), Some(vec!["А".into(), "Б".into()]));
         assert_eq!(p(&json!([["А", "en"]]), 2), None);
         assert!(super::valid_lang("ru") && super::valid_lang("zh-CN") && !super::valid_lang("r&u"));
+    }
+
+    #[test]
+    fn parses_a_single_text_with_its_language() {
+        let p = super::parse_one;
+        let pair = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+        assert_eq!(p(&json!([["Привет,\nмир", "en"]])), pair("Привет,\nмир", "en"));
+        assert_eq!(p(&json!(["Привет", "de"])), pair("Привет", "de"));
+        assert_eq!(p(&json!("Привет")), pair("Привет", ""));
+        assert_eq!(p(&json!({"a": 1})), None);
+        assert!(super::same_lang("en-US", "en") && !super::same_lang("", "") && !super::same_lang("ru", "en"));
+    }
+
+    /// Network: `cargo test translate -- --ignored`.
+    #[test]
+    #[ignore]
+    fn translates_a_selection() {
+        let (text, from) = super::translate_text("Hello world.\nSecond line & more", "ru").unwrap();
+        assert_eq!(from, "en");
+        assert!(text.contains('\n') && text.to_lowercase().contains("мир"), "{text:?}");
     }
 
     /// Network: `cargo test translate -- --ignored`.

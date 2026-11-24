@@ -256,6 +256,10 @@ body.max .rz{display:none}
 #wclose svg{shape-rendering:geometricPrecision}
 #omni:not(.focus) #url.viewing::selection{background:transparent}
 
+/* menu button: a dot while a downloaded update waits for a restart */
+#menu{position:relative}
+#menu.upd::after{content:'';position:absolute;right:7px;top:7px;width:7px;height:7px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 2px var(--bar,#18191e)}
+
 /* downloads button: arrow + progress ring */
 #dlbtn{position:relative}
 #dlbtn .dlic{transition:transform .2s ease,color .2s ease}
@@ -580,6 +584,10 @@ function updateTab(el, t) {
   snd.title = t.muted ? 'Включить звук (Ctrl+M)' : 'Выключить звук (Ctrl+M)';
 }
 
+// Tab strip layout is measured once per frame, and the strip scrolls to the
+// active tab only when it (or the set of tabs) changed: a title or progress
+// update must not yank a strip the user has scrolled away.
+let tabsLayoutQueued = false, tabsSeen = '';
 function renderTabs() {
   const ids = new Set(S.tabs.map(t => t.id));
   for (const [id, el] of els) if (!ids.has(id)) { el.remove(); els.delete(id); }
@@ -592,8 +600,14 @@ function renderTabs() {
     if (at !== el) tabsEl.insertBefore(el, at);
     prev = el;
   }
+  if (tabsLayoutQueued) return;
+  tabsLayoutQueued = true;
   requestAnimationFrame(() => {
+    tabsLayoutQueued = false;
     for (const el of els.values()) el.classList.toggle('narrow', el.offsetWidth < 90);
+    const seen = S.active + ':' + S.tabs.length;
+    if (seen === tabsSeen) return;
+    tabsSeen = seen;
     const a = els.get(S.active);
     if (a) a.scrollIntoView({block: 'nearest', inline: 'nearest'});
   });
@@ -672,11 +686,18 @@ function renderBar() {
   document.body.classList.toggle('max', !!S.max);
   if (S.space) document.documentElement.style.setProperty('--sp', S.space.color);
   renderChips();
-  $('wmax').innerHTML = S.max
-    ? '<svg viewBox="0 0 10 10"><path d="M2.5 2.5V.5h7v7h-2"/><rect x=".5" y="2.5" width="7" height="7"/></svg>'
-    : '<svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg>';
+  const wmax = $('wmax'), maxK = S.max ? 'max' : 'win';
+  if (wmax.dataset.k !== maxK) {
+    wmax.dataset.k = maxK;
+    wmax.innerHTML = S.max
+      ? '<svg viewBox="0 0 10 10"><path d="M2.5 2.5V.5h7v7h-2"/><rect x=".5" y="2.5" width="7" height="7"/></svg>'
+      : '<svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg>';
+    wmax.title = S.max ? 'Свернуть в окно' : 'Развернуть';
+  }
   renderDlButton();
-  $('wmax').title = S.max ? 'Свернуть в окно' : 'Развернуть';
+  const mb = $('menu');
+  mb.classList.toggle('upd', !!S.update);
+  mb.title = S.update ? `Меню · доступна версия ${S.update}` : 'Меню';
   $('back').classList.toggle('off', !S.back);
   $('fwd').classList.toggle('off', !S.fwd);
   const rl = $('reload');
@@ -693,7 +714,10 @@ function renderBar() {
   if (sec.dataset.k !== k) { sec.dataset.k = k; sec.innerHTML = I[k]; }
   sec.className = k === 'warn' ? 'warn' : k === 'mask' ? 'priv' : '';
   sec.title = k === 'lock' ? 'Защищённое соединение' : k === 'warn' ? 'Соединение не защищено' : '';
-  if (document.activeElement !== url) url.value = shortUrl(u);
+  // "Focused" is the bar's own state: after the page takes the focus the input
+  // stays this document's activeElement, and an empty value left by the Tablo
+  // showed its placeholder under the site + title view.
+  if (!omni.classList.contains('focus')) url.value = shortUrl(u);
   else if (!bars.url.edited && url.value !== readable(u)) { url.value = readable(u); url.select(); }
   renderUrlView();
   const star = $('star');
@@ -800,6 +824,7 @@ url.addEventListener('focus', () => {
 });
 url.addEventListener('blur', () => {
   omni.classList.remove('focus');
+  bars.url.edited = false;
   url.setSelectionRange(0, 0); // no stale selection under the idle site + title view
   closeDrop();
   url.value = shortUrl(S.url || '');
@@ -1512,55 +1537,33 @@ const ICON = {
   x: '<svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>',
   more: '<svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>',
 };
+// Rows are kept by id and updated in place: progress comes several times a second,
+// and rebuilding the whole list used to close an open "⋮" menu each time.
+const drows = new Map();
+const dlKey = it => JSON.stringify([it.state, it.paused, it.exists, it.name, it.url, it.ext, it.auto]);
 function renderDownloads(d) {
   dl = d;
-  closeDmenu();
   const list = $('dlist');
-  list.textContent = '';
   const items = d.items || [];
+  const ids = new Set(items.map(it => it.id));
+  if (dmenuFor && !ids.has(dmenuFor.id)) closeDmenu();
+  for (const [id, r] of drows) if (!ids.has(id)) { r.row.remove(); drows.delete(id); }
+  for (const e of list.querySelectorAll('.dempty')) e.remove();
+  let prev = null;
   for (const it of items) {
-    const row = document.createElement('div');
-    row.className = 'drow' + (it.state !== 0 && !(it.state === 1 && it.exists) ? ' gone' : '');
-    const txt = document.createElement('div');
-    txt.className = 'dtxt';
-    const nm = document.createElement('div');
-    nm.className = 'dname';
-    nm.textContent = it.name || it.url;
-    nm.title = it.name || it.url;
-    const st = document.createElement('div');
-    st.className = 'dstat';
-    st.textContent = dlStatus(it);
-    txt.append(nm, st);
-    if (it.state === 0) {
-      const bar = document.createElement('div');
-      bar.className = 'dbar';
-      const fill = document.createElement('i');
-      fill.style.width = (it.total > 0 ? Math.min(100, 100 * it.received / it.total) : 12) + '%';
-      bar.appendChild(fill);
-      txt.appendChild(bar);
+    let r = drows.get(it.id);
+    const key = dlKey(it);
+    if (!r || r.key !== key) {
+      if (dmenuFor && dmenuFor.id === it.id) closeDmenu();
+      const fresh = {...dlRow(it), key};
+      if (r) r.row.replaceWith(fresh.row);
+      drows.set(it.id, r = fresh);
     }
-    const act = document.createElement('div');
-    act.className = 'dact';
-    const button = (icon, title, fn, cls) => {
-      const b = document.createElement('button');
-      b.className = 'dbtn' + (cls ? ' ' + cls : '');
-      b.title = title;
-      b.innerHTML = icon;
-      b.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
-      b.onclick = e => { e.stopPropagation(); fn(b); };
-      act.appendChild(b);
-      return b;
-    };
-    if (it.state === 0) {
-      button(it.paused ? ICON.play : ICON.pause, it.paused ? 'Продолжить' : 'Пауза', () => send({cmd: 'dl', text: it.paused ? 'resume' : 'pause', id: it.id}));
-      button(ICON.x, 'Отменить', () => send({cmd: 'dl', text: 'cancel', id: it.id}));
-    } else {
-      button(ICON.more, 'Ещё', b => (dmenuFor && dmenuFor.id === it.id) ? closeDmenu() : openDmenu(it, b), 'hov');
-    }
-    row.append(fileIcon(it.ext), txt, act);
-    row.addEventListener('click', () => { if (it.state === 1 && it.exists) send({cmd: 'dl', text: 'open', id: it.id}); });
-    row.addEventListener('contextmenu', e => { e.preventDefault(); openDmenu(it, {getBoundingClientRect: () => ({left: e.clientX, right: e.clientX, bottom: e.clientY}), classList: {add() {}, remove() {}}}); });
-    list.appendChild(row);
+    r.st.textContent = dlStatus(it);
+    if (r.fill) r.fill.style.width = (it.total > 0 ? Math.min(100, 100 * it.received / it.total) : 12) + '%';
+    const at = prev ? prev.nextSibling : list.firstChild;
+    if (at !== r.row) list.insertBefore(r.row, at);
+    prev = r.row;
   }
   if (!items.length) {
     const e = document.createElement('div');
@@ -1569,6 +1572,50 @@ function renderDownloads(d) {
     list.appendChild(e);
   }
   $('dfoot').hidden = !items.some(x => x.state !== 0);
+}
+// One download row; status text and progress bar are filled by renderDownloads.
+function dlRow(it) {
+  let fill = null;
+  const row = document.createElement('div');
+  row.className = 'drow' + (it.state !== 0 && !(it.state === 1 && it.exists) ? ' gone' : '');
+  const txt = document.createElement('div');
+  txt.className = 'dtxt';
+  const nm = document.createElement('div');
+  nm.className = 'dname';
+  nm.textContent = it.name || it.url;
+  nm.title = it.name || it.url;
+  const st = document.createElement('div');
+  st.className = 'dstat';
+  txt.append(nm, st);
+  if (it.state === 0) {
+    const bar = document.createElement('div');
+    bar.className = 'dbar';
+    fill = document.createElement('i');
+    bar.appendChild(fill);
+    txt.appendChild(bar);
+  }
+  const act = document.createElement('div');
+  act.className = 'dact';
+  const button = (icon, title, fn, cls) => {
+    const b = document.createElement('button');
+    b.className = 'dbtn' + (cls ? ' ' + cls : '');
+    b.title = title;
+    b.innerHTML = icon;
+    b.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+    b.onclick = e => { e.stopPropagation(); fn(b); };
+    act.appendChild(b);
+    return b;
+  };
+  if (it.state === 0) {
+    button(it.paused ? ICON.play : ICON.pause, it.paused ? 'Продолжить' : 'Пауза', () => send({cmd: 'dl', text: it.paused ? 'resume' : 'pause', id: it.id}));
+    button(ICON.x, 'Отменить', () => send({cmd: 'dl', text: 'cancel', id: it.id}));
+  } else {
+    button(ICON.more, 'Ещё', b => (dmenuFor && dmenuFor.id === it.id) ? closeDmenu() : openDmenu(it, b), 'hov');
+  }
+  row.append(fileIcon(it.ext), txt, act);
+  row.addEventListener('click', () => { if (it.state === 1 && it.exists) send({cmd: 'dl', text: 'open', id: it.id}); });
+  row.addEventListener('contextmenu', e => { e.preventDefault(); openDmenu(it, {getBoundingClientRect: () => ({left: e.clientX, right: e.clientX, bottom: e.clientY}), classList: {add() {}, remove() {}}}); });
+  return {row, st, fill};
 }
 function openDmenu(it, anchor) {
   closeDmenu();

@@ -139,7 +139,7 @@ fn find_folder(manifest_name: &str) -> Option<(PathBuf, String)> {
 }
 
 /// "1.12.10" > "1.12.9"
-fn newer(latest: &str, have: &str) -> bool {
+pub(crate) fn newer(latest: &str, have: &str) -> bool {
     let parts = |s: &str| s.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
     parts(latest) > parts(have)
 }

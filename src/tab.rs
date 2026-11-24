@@ -15,15 +15,16 @@ use tao::{event_loop::EventLoopProxy, window::Window};
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, AddScriptToExecuteOnDocumentCreatedCompletedHandler,
     BytesReceivedChangedEventHandler, CallDevToolsProtocolMethodCompletedHandler, CapturePreviewCompletedHandler,
-    ContainsFullScreenElementChangedEventHandler,
-    ContentLoadingEventHandler, DownloadStartingEventHandler, ExecuteScriptCompletedHandler,
-    FaviconChangedEventHandler, HistoryChangedEventHandler, IsDocumentPlayingAudioChangedEventHandler,
-    StateChangedEventHandler, Microsoft::Web::WebView2::Win32::*, NavigationStartingEventHandler,
-    SourceChangedEventHandler, WebMessageReceivedEventHandler,
+    ContainsFullScreenElementChangedEventHandler, ContextMenuRequestedEventHandler,
+    ContentLoadingEventHandler, CustomItemSelectedEventHandler, DownloadStartingEventHandler,
+    ExecuteScriptCompletedHandler, FaviconChangedEventHandler, HistoryChangedEventHandler,
+    IsDocumentPlayingAudioChangedEventHandler, StateChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
+    NavigationStartingEventHandler, SourceChangedEventHandler, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler, take_pwstr,
 };
 use windows::{
     Win32::{
+        Foundation::POINT,
         System::Com::{IStream, STREAM_SEEK_SET},
         UI::{
             Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT},
@@ -199,14 +200,19 @@ pub enum UserEvent {
     AdblockResources(String),
     /// A Tablo icon finished downloading into the disk cache.
     IconCached,
-    /// A download began (our own downloads button replaces Edge's flyout).
-    DlStart { id: u32, url: String, path: String, total: i64, page: String, private: bool },
+    /// A download began (our own downloads button replaces Edge's flyout) in tab `tab`.
+    DlStart { id: u32, tab: u32, url: String, path: String, total: i64, page: String, private: bool },
     /// (download id, bytes received, total bytes or -1).
     DlProgress(u32, i64, i64),
     /// (download id, state: 1 done / 2 failed / 3 cancelled, received, total, final path).
     DlState(u32, u8, i64, i64, String),
+    /// "Перевести «…»" in a page's context menu: (tab, selected text, click point in
+    /// the webview's physical pixels — for text in frames and fields).
+    TranslateSelection(u32, String, i32, i32),
     /// A webview process failed / hung (see recover.rs).
     Recover(crate::app::recover::Ev),
+    /// A self-update check finished (update.rs); true when the user asked for it.
+    Update(crate::update::Outcome, bool),
 }
 
 pub type Proxy = EventLoopProxy<UserEvent>;
@@ -306,12 +312,21 @@ pub fn build(
             NewWindowResponse::Deny
         });
 
-    let builder = match spec.source {
-        Source::Url(u) => builder.with_url(u),
-        Source::Html(h) => builder.with_html(h),
-        Source::Blank => builder,
+    // HTML is loaded only once the webview exists: if wry's own navigation fails
+    // during creation (NavigateToString refuses anything over 2 MB), it returns the
+    // error but leaves its half-made webview window over the page area, covering
+    // every other tab.
+    let (builder, html) = match spec.source {
+        Source::Url(u) => (builder.with_url(u), None),
+        Source::Html(h) => (builder, Some(h)),
+        Source::Blank => (builder, None),
     };
     let view = builder.build_as_child(window)?;
+    if let Some(h) = html
+        && let Err(e) = view.load_html(&h)
+    {
+        eprintln!("internal page ({} bytes) not loaded: {e}", h.len());
+    }
     clip_siblings(&view);
 
     unsafe {
@@ -319,7 +334,8 @@ pub fn build(
         if let Err(e) = hook_content(&view, id, proxy, block, shared, spec.tracking) {
             eprintln!("tab hooks failed: {e}");
         }
-        let _ = hook_downloads(&view, proxy, downloads, private);
+        let _ = hook_downloads(&view, id, proxy, downloads, private);
+        let _ = hook_context_menu(&view, id, proxy);
         crate::app::recover::hook(&view, id, proxy);
         // The page took the keyboard focus (the user clicked into it).
         let p = proxy.clone();
@@ -410,10 +426,40 @@ pub fn map_key(vk: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Cmd> {
     })
 }
 
+/// 0 running (or paused), 1 done, 2 failed, 3 cancelled by the user.
+unsafe fn dl_state_code(op: &ICoreWebView2DownloadOperation, st: COREWEBVIEW2_DOWNLOAD_STATE) -> u8 {
+    if st == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
+        1
+    } else if st == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED {
+        let mut why = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
+        let _ = unsafe { op.InterruptReason(&mut why) };
+        if why == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED { 3 } else { 2 }
+    } else {
+        0
+    }
+}
+
+/// A download as the engine sees it right now: (state as in `DlState`, received,
+/// total, final path). None when the operation can no longer be asked.
+pub fn dl_status(op: &ICoreWebView2DownloadOperation) -> Option<(u8, i64, i64, String)> {
+    unsafe {
+        let mut st = COREWEBVIEW2_DOWNLOAD_STATE::default();
+        op.State(&mut st).ok()?;
+        let (mut got, mut all) = (0i64, 0i64);
+        op.BytesReceived(&mut got).ok()?;
+        op.TotalBytesToReceive(&mut all).ok()?;
+        let mut s = PWSTR::null();
+        let path = op.ResultFilePath(&mut s).map(|_| take_pwstr(s)).unwrap_or_default();
+        Some((dl_state_code(op, st), got, all, path))
+    }
+}
+
 /// Downloads go to our own panel: hide Edge's flyout, report start, progress
-/// (at most 4 updates a second) and the final state.
+/// (at most 4 updates a second) and the final state. The app also polls the
+/// operations (`dl_status`), so a lost event cannot leave a download "running".
 unsafe fn hook_downloads(
     view: &WebView,
+    tab: u32,
     proxy: &Proxy,
     downloads: &Downloads,
     private: bool,
@@ -459,40 +505,121 @@ unsafe fn hook_downloads(
                     &mut t,
                 )?;
 
-                let (p, reg) = (proxy.clone(), registry.clone());
+                // The app drops the operation from the registry once it has seen the end.
+                let p = proxy.clone();
                 op.add_StateChanged(
                     &StateChangedEventHandler::create(Box::new(move |op, _| {
                         let Some(op) = op else { return Ok(()) };
-                        let mut st = COREWEBVIEW2_DOWNLOAD_STATE::default();
-                        op.State(&mut st)?;
-                        let state = if st == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
-                            1
-                        } else if st == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED {
-                            let mut why = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
-                            op.InterruptReason(&mut why)?;
-                            if why == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED { 3 } else { 2 }
-                        } else {
-                            return Ok(()); // paused/resumed: progress events cover it
-                        };
-                        reg.borrow_mut().remove(&id);
-                        let (mut got, mut all) = (0i64, 0i64);
-                        op.BytesReceived(&mut got)?;
-                        op.TotalBytesToReceive(&mut all)?;
-                        let mut s = PWSTR::null();
-                        let path = op.ResultFilePath(&mut s).map(|_| take_pwstr(s)).unwrap_or_default();
-                        let _ = p.send_event(UserEvent::DlState(id, state, got, all, path));
+                        match dl_status(&op) {
+                            // paused/resumed: progress events cover it
+                            Some((state, got, all, path)) if state != 0 => {
+                                let _ = p.send_event(UserEvent::DlState(id, state, got, all, path));
+                            }
+                            _ => {}
+                        }
                         Ok(())
                     })),
                     &mut t,
                 )?;
 
                 registry.borrow_mut().insert(id, op);
-                let _ = proxy.send_event(UserEvent::DlStart { id, url, path, total, page, private });
+                let _ = proxy.send_event(UserEvent::DlStart { id, tab, url, path, total, page, private });
                 Ok(())
             })),
             &mut token,
         )
     }
+}
+
+/// Context menu over selected text gets "Перевести «…»" right after the copy
+/// items: the translation shows in a bubble by the selection (see content.js).
+unsafe fn hook_context_menu(view: &WebView, id: u32, proxy: &Proxy) -> windows::core::Result<()> {
+    let core = view.webview();
+    let c11 = core.cast::<ICoreWebView2_11>()?;
+    let env = view.environment().cast::<ICoreWebView2Environment9>()?;
+    let proxy = proxy.clone();
+    let mut token = 0i64;
+    unsafe {
+        c11.add_ContextMenuRequested(
+            &ContextMenuRequestedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let target = args.ContextMenuTarget()?;
+                let mut has = BOOL::default();
+                target.HasSelection(&mut has)?;
+                // The bubble lives in content.js, which runs on web pages only.
+                let mut page = PWSTR::null();
+                target.PageUri(&mut page)?;
+                if !has.as_bool() || !take_pwstr(page).starts_with("http") {
+                    return Ok(());
+                }
+                let mut s = PWSTR::null();
+                target.SelectionText(&mut s)?;
+                let text = take_pwstr(s).trim().to_string();
+                if !text.chars().any(char::is_alphabetic) {
+                    return Ok(());
+                }
+                let mut at = POINT::default();
+                args.Location(&mut at)?;
+                let item = env.CreateContextMenuItem(
+                    &HSTRING::from(selection_label(&text)),
+                    None::<&IStream>,
+                    COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,
+                )?;
+                let p = proxy.clone();
+                let mut t = 0i64;
+                item.add_CustomItemSelected(
+                    &CustomItemSelectedEventHandler::create(Box::new(move |_, _| {
+                        let _ = p.send_event(UserEvent::TranslateSelection(id, text.clone(), at.x, at.y));
+                        Ok(())
+                    })),
+                    &mut t,
+                )?;
+                // After "Копировать" (and "Копировать ссылку на выделенный фрагмент").
+                let items = args.MenuItems()?;
+                let mut n = 0u32;
+                items.Count(&mut n)?;
+                let name = |i: u32| -> String {
+                    let mut s = PWSTR::null();
+                    items.GetValueAtIndex(i).and_then(|it| it.Name(&mut s)).map(|_| take_pwstr(s)).unwrap_or_default()
+                };
+                match (0..n).find(|&i| name(i) == "copy") {
+                    Some(i) => {
+                        let at = if i + 1 < n && name(i + 1) == "copyLinkToHighlight" { i + 2 } else { i + 1 };
+                        items.InsertValueAtIndex(at, &item)?;
+                    }
+                    None => {
+                        items.InsertValueAtIndex(0, &item)?;
+                        if n > 0 {
+                            let sep = env.CreateContextMenuItem(
+                                w!(""),
+                                None::<&IStream>,
+                                COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR,
+                            )?;
+                            items.InsertValueAtIndex(1, &sep)?;
+                        }
+                    }
+                }
+                Ok(())
+            })),
+            &mut token,
+        )
+    }
+}
+
+/// `Перевести «Press reports put…»`: a short quote of the selection, on one line.
+/// `&` is doubled, the menu would take it for a mnemonic.
+fn selection_label(text: &str) -> String {
+    const MAX: usize = 24;
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut quote: String = flat.chars().take(MAX).collect();
+    if flat.chars().count() > MAX {
+        // Whole words when that keeps a fair part of the quote.
+        if let Some(cut) = quote.rfind(' ').filter(|&i| quote[..i].chars().count() >= MAX / 2) {
+            quote.truncate(cut);
+        }
+        quote = format!("{}…", quote.trim_end());
+    }
+    format!("Перевести «{}»", quote.replace('&', "&&"))
 }
 
 /// Native tracking prevention (Edge lists), runs in-process — no overhead for us.
@@ -930,6 +1057,13 @@ mod tests {
         for (i, o) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foobar", "Zm9vYmFy")] {
             assert_eq!(super::base64(i.as_bytes()), o);
         }
+    }
+
+    #[test]
+    fn selection_label_is_short_and_safe() {
+        assert_eq!(super::selection_label("Hello"), "Перевести «Hello»");
+        assert_eq!(super::selection_label("Press reports put\n\n this bug in the spotlight"), "Перевести «Press reports put this…»");
+        assert_eq!(super::selection_label("R&D"), "Перевести «R&&D»");
     }
 
     #[test]

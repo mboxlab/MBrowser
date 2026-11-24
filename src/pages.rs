@@ -94,12 +94,19 @@ struct Row<'a> {
     l: u64,
 }
 
-pub fn history(history: &History) -> String {
+/// The history page. Its rows are not in the HTML: a big history made the page
+/// larger than WebView2 accepts (`NavigateToString` stops at 2 MB). The page asks
+/// for them with this run's token and gets `history_message` back.
+pub fn history(token: &str) -> String {
+    HISTORY.replace("/*TOKEN*/\"\"", &embed(&token))
+}
+
+/// `{"mb":"int","hist":[{u,t,l}…]}`, newest first: the whole history for the page.
+pub fn history_message(history: &History) -> String {
     let mut rows: Vec<Row> =
         history.entries.iter().map(|e| Row { u: &e.url, t: &e.title, l: e.last }).collect();
     rows.sort_unstable_by(|a, b| b.l.cmp(&a.l));
-    rows.truncate(4000);
-    HISTORY.replace("/*ROWS*/null", &embed(&rows))
+    format!(r#"{{"mb":"int","hist":{}}}"#, serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()))
 }
 
 const NEWTAB: &str = r#"<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Новая вкладка</title>
@@ -166,11 +173,14 @@ a:hover{background:var(--card)}
 <h1>История</h1><input id="q" autofocus placeholder="Поиск по истории" spellcheck="false">
 <div id="list"></div><button id="more">Показать ещё</button>
 </main><script>
-const ROWS=/*ROWS*/null||[];
+const TOKEN=/*TOKEN*/"";
+const wv=window.chrome&&window.chrome.webview;
+let ROWS=[],loaded=false;
 const list=document.getElementById('list'),more=document.getElementById('more');
 let limit=300;
 function host(u){try{return new URL(u).host}catch{return u}}
 function render(){
+  if(!loaded){list.textContent='';const e=document.createElement('div');e.className='empty';e.textContent='Загрузка…';list.appendChild(e);return}
   const q=document.getElementById('q').value.toLowerCase().split(/\s+/).filter(Boolean);
   const rows=q.length?ROWS.filter(r=>{const s=(r.t+' '+r.u).toLowerCase();return q.every(w=>s.includes(w))}):ROWS;
   list.textContent='';let day='';const frag=document.createDocumentFragment();
@@ -189,4 +199,37 @@ function render(){
 document.getElementById('q').oninput=()=>{limit=300;render()};
 more.onclick=()=>{limit+=500;render()};
 render();
+// The rows come from the browser (they no longer fit into the page itself).
+if(wv){
+  wv.addEventListener('message',e=>{const m=e.data;if(m&&m.mb==='int'&&Array.isArray(m.hist)){ROWS=m.hist;loaded=true;render()}});
+  wv.postMessage({mb:'int',t:TOKEN,a:'history'});
+}
 </script></body></html>"#;
+
+#[cfg(test)]
+mod tests {
+    use crate::store::{HistEntry, History};
+
+    #[test]
+    fn history_page_stays_small_and_gets_its_rows_by_message() {
+        // A history the size that broke the page: ~20 000 entries, several MB.
+        let entries = (0..20_000u64)
+            .map(|i| HistEntry {
+                url: format!("https://example.com/articles/{i}?utm_source=feed&ref=home"),
+                title: format!("Заголовок статьи номер {i} — довольно длинный, как на новостных сайтах"),
+                visits: 1,
+                last: 1_700_000_000 + i,
+            })
+            .collect();
+        let h = History::from_entries(entries);
+        let page = super::history("tok\"en");
+        assert!(page.len() < 64 * 1024, "page is {} bytes", page.len());
+        assert!(page.contains(r#"const TOKEN="tok\"en";"#));
+        let msg: serde_json::Value = serde_json::from_str(&super::history_message(&h)).unwrap();
+        assert_eq!(msg["mb"], "int");
+        let rows = msg["hist"].as_array().unwrap();
+        assert_eq!(rows.len(), 20_000);
+        assert_eq!(rows[0]["l"], 1_700_000_000u64 + 19_999); // newest first
+        assert!(rows[0]["u"].as_str().unwrap().ends_with("/19999?utm_source=feed&ref=home"));
+    }
+}

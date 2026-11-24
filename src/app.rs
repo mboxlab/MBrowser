@@ -171,7 +171,18 @@ struct Tab {
     fwd: Vec<String>,
     /// Steps left while a new webview rebuilds that history.
     replay: VecDeque<Replay>,
+    /// Tab whose link opened this one (0 = none): closing a tab that only
+    /// started a download goes back there.
+    opener: u32,
+    /// The hidden webview was switched to WebView2's low-memory mode.
+    trimmed: bool,
 }
+
+/// A background tab keeps its normal memory level this long before it is trimmed:
+/// trimming right away made every switch back to a tab redraw it from scratch.
+const TRIM_AFTER: Duration = Duration::from_secs(60);
+/// How often running downloads are checked against the engine (lost events).
+const DL_POLL: Duration = Duration::from_secs(2);
 
 /// One step of rebuilding a tab's history in a new webview.
 #[derive(Debug)]
@@ -215,6 +226,8 @@ impl Tab {
             back: Vec::new(),
             fwd: Vec::new(),
             replay: VecDeque::new(),
+            opener: 0,
+            trimmed: false,
         }
     }
 
@@ -329,6 +342,17 @@ pub struct App {
     /// Download list, newest first (running ones included).
     downloads: Vec<DownloadItem>,
     dl_ops: tab::Downloads,
+    /// Next check of the running downloads against the engine.
+    dl_poll: Instant,
+    /// Webviews of closed tabs that still have downloads running (tab id, view):
+    /// destroying them would lose the downloads. Dropped once those finish.
+    parked: Vec<(u32, WebView)>,
+    /// Request ids of selection translations (a newer one replaces the bubble).
+    sel_seq: u64,
+    /// A newer version is in place (update.rs) and runs after a restart.
+    update_ready: Option<String>,
+    /// The settings tab that pressed "Проверить сейчас" (gets the answer).
+    update_asker: u32,
     /// Installed browser extensions (for the "Расширения" panel).
     exts: ext::List,
     /// A download finished since the panel was last opened.
@@ -388,7 +412,6 @@ pub struct App {
 
 impl App {
     pub fn new(event_loop: &EventLoop<UserEvent>) -> wry::Result<Self> {
-        recover::on_start();
         let proxy = event_loop.create_proxy();
         // The compiled ad-blocking engine is read while the window and the
         // browser environment are being created.
@@ -514,6 +537,11 @@ impl App {
                 list
             },
             dl_ops: Rc::new(RefCell::new(HashMap::new())),
+            dl_poll: Instant::now(),
+            parked: Vec::new(),
+            sel_seq: 0,
+            update_ready: None,
+            update_asker: 0,
             exts,
             dl_unseen: false,
             block,
@@ -787,6 +815,7 @@ impl App {
         if kind == Panel::Downloads {
             self.dl_unseen = false;
             self.ui_dirty = true;
+            self.check_dl_files();
         }
         if kind == Panel::Extensions {
             ext::refresh(&self.ui, &self.exts, &self.proxy);
@@ -829,10 +858,10 @@ impl App {
             self.close_panel(false);
         }
         // Hide whatever page was showing (e.g. from the space we just left).
+        // Its memory is trimmed later, in `tick`, if it stays hidden.
         if let Some(i) = self.active_idx() {
             if let Some(v) = &self.tabs[i].view {
                 let _ = v.set_visible(false);
-                let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
             }
             self.tabs[i].last_active = Instant::now();
         }
@@ -948,7 +977,7 @@ impl App {
         if self.spare.as_ref().is_some_and(|s| s.tab.private == private) {
             return;
         }
-        self.spare = None;
+        self.drop_spare();
         let id = self.alloc_id();
         let mut tab = Tab::new(id, self.space, "", private);
         tab.internal = None;
@@ -980,7 +1009,7 @@ impl App {
         }
         // Another site already committed there would end up in Back: start over.
         if self.spare.as_ref().is_some_and(|s| s.committed && s.target != url) {
-            self.spare = None;
+            self.drop_spare();
         }
         self.warm_spare();
         if let Some(s) = self.spare.as_mut() {
@@ -1022,7 +1051,7 @@ impl App {
         self.panel_wait = None;
         self.panel_up = false;
         self.home = false;
-        self.spare = None; // not adopted: the prerendered page is thrown away
+        self.drop_spare(); // not adopted: the prerendered page is thrown away
         self.dl_watch = false;
         if self.glass_on {
             self.glass_on = false;
@@ -1094,13 +1123,111 @@ impl App {
                 json!({
                     "id": d.id, "name": name, "url": d.url, "page": d.page,
                     "total": d.total, "received": d.received, "state": d.state, "paused": d.paused,
-                    "exists": !d.path.is_empty() && Path::new(&d.path).exists(),
+                    "exists": d.exists,
                     "auto": !ext.is_empty() && self.settings.auto_open.contains(&ext),
                     "ext": ext,
                 })
             })
             .collect();
         json!({ "items": items })
+    }
+
+    /// The list is about to be shown: see which files are still on disk.
+    fn check_dl_files(&mut self) {
+        for d in self.downloads.iter_mut().take(80) {
+            d.exists = d.state == 1 && !d.path.is_empty() && Path::new(&d.path).exists();
+        }
+    }
+
+    /// A download is over: `DlState` from the engine, or the poll noticed it first.
+    fn finish_download(&mut self, id: u32, state: u8, got: i64, all: i64, path: String) {
+        self.dl_ops.borrow_mut().remove(&id);
+        let mut open_now = None;
+        let Some(d) = self.downloads.iter_mut().find(|d| d.id == id && d.state == 0) else {
+            self.release_parked(); // removed from the list meanwhile, or already settled
+            return;
+        };
+        d.state = state;
+        d.received = got;
+        d.total = all;
+        d.paused = false;
+        if !path.is_empty() {
+            d.path = path;
+        }
+        d.exists = state == 1 && Path::new(&d.path).exists();
+        let ext = file_ext(&d.path);
+        if state == 1 && d.exists && !ext.is_empty() && self.settings.auto_open.contains(&ext) {
+            open_now = Some(d.path.clone());
+        }
+        if state == 1 && self.panel != Some(Panel::Downloads) && !self.dl_watch {
+            self.dl_unseen = true;
+        }
+        if let Some(p) = open_now {
+            shell_open(&p);
+        }
+        self.release_parked();
+        self.downloads_changed(true);
+    }
+
+    /// When the main loop should call `poll_downloads` (only while something downloads).
+    pub fn dl_poll_at(&self) -> Option<Instant> {
+        self.downloads.iter().any(|d| d.state == 0).then_some(self.dl_poll)
+    }
+
+    /// Safety net for lost download events: ask the engine about every running
+    /// download. Finished ones are settled; one the engine no longer knows ended
+    /// when its webview went away — done if its whole file is there, else failed.
+    pub fn poll_downloads(&mut self) {
+        let now = Instant::now();
+        if now < self.dl_poll {
+            return;
+        }
+        self.dl_poll = now + DL_POLL;
+        let running: Vec<u32> = self.downloads.iter().filter(|d| d.state == 0).map(|d| d.id).collect();
+        let mut moved = false;
+        for id in running {
+            let op = self.dl_ops.borrow().get(&id).cloned();
+            match op.as_ref().and_then(tab::dl_status) {
+                Some((0, got, all, _)) => {
+                    if let Some(d) = self.downloads.iter_mut().find(|d| d.id == id)
+                        && (d.received, d.total) != (got, all)
+                    {
+                        (d.received, d.total) = (got, all);
+                        moved = true;
+                    }
+                }
+                Some((state, got, all, path)) => self.finish_download(id, state, got, all, path),
+                None => {
+                    let Some(d) = self.downloads.iter().find(|d| d.id == id) else { continue };
+                    // The engine writes straight into the final file, so it being
+                    // there proves nothing: its size must be the whole download.
+                    let size = std::fs::metadata(&d.path).ok().filter(|m| m.is_file()).map(|m| m.len() as i64);
+                    let whole = size.is_some_and(|n| if d.total > 0 { n == d.total } else { n > 0 && n >= d.received });
+                    let (got, all, path) = (d.received, d.total, d.path.clone());
+                    self.finish_download(id, if whole { 1 } else { 2 }, got, all, path);
+                }
+            }
+        }
+        if moved {
+            self.downloads_changed(false);
+        }
+    }
+
+    /// A link opened in a new tab turned out to be a download: that tab never
+    /// showed a page, so it is closed (as in Chrome) and its opener comes back.
+    /// Its webview stays alive, hidden, until the download ends.
+    fn close_download_tab(&mut self, id: u32) {
+        let Some(i) = self.idx(id) else { return };
+        let t = &self.tabs[i];
+        let blank = t.internal.is_none()
+            && t.replay.is_empty()
+            && t.view.as_ref().is_some_and(|v| {
+                v.url().is_ok_and(|u| u.is_empty() || u == "about:blank") && !v.can_go_back().unwrap_or(true)
+            });
+        if blank {
+            let opener = t.opener;
+            self.close_tab(id, false, opener);
+        }
     }
 
     // ------------------------------------------------------------ extension popups
@@ -1243,10 +1370,13 @@ impl App {
                         let _ = op.Cancel();
                     }
                 }
+                self.dl_ops.borrow_mut().remove(&id);
                 self.downloads.remove(i);
+                self.release_parked();
             }
             "delete" => {
                 let _ = std::fs::remove_file(&path);
+                self.downloads[i].exists = Path::new(&path).exists();
             }
             "auto" => {
                 let ext = file_ext(&path);
@@ -1400,7 +1530,12 @@ impl App {
             let other = self.spaces[if pos == 0 { 1 } else { pos - 1 }].id;
             self.switch_space(other);
         }
+        let gone: Vec<(u32, Option<WebView>)> =
+            self.tabs.iter_mut().filter(|t| t.space == sid).map(|t| (t.id, t.view.take())).collect();
         self.tabs.retain(|t| t.space != sid);
+        for (id, view) in gone {
+            self.retire_view(id, view);
+        }
         self.spaces.retain(|s| s.id != sid);
         self.ui_dirty = true;
         self.session_dirty = true;
@@ -1542,11 +1677,11 @@ impl App {
         }
         if self.active != id {
             if let Some(old) = self.active_idx() {
+                // Hidden now; its memory is trimmed in `tick` if it stays in the background.
                 let t = &mut self.tabs[old];
                 t.last_active = Instant::now();
                 if let Some(v) = &t.view {
                     let _ = v.set_visible(false);
-                    let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
                 }
             }
             self.active = id;
@@ -1560,7 +1695,9 @@ impl App {
         t.last_active = Instant::now();
         if let Some(v) = &t.view {
             let _ = v.set_bounds(rect);
-            let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
+            if std::mem::take(&mut t.trimmed) {
+                let _ = v.set_memory_usage_level(MemoryUsageLevel::Normal);
+            }
             let _ = v.set_visible(true);
             if !self.ui_focus {
                 let _ = v.focus();
@@ -1617,10 +1754,18 @@ impl App {
     }
 
     fn close(&mut self, id: u32) {
+        self.close_tab(id, true, 0);
+    }
+
+    /// `remember`: it can be reopened with Ctrl+Shift+T. `prefer`: the tab to show
+    /// next if this one was active (else its neighbour).
+    fn close_tab(&mut self, id: u32, remember: bool, prefer: u32) {
         let Some(idx) = self.idx(id) else { return };
         let pos = self.visible().iter().position(|&g| g == idx);
-        let t = self.tabs.remove(idx);
-        if !t.private && t.internal != Some(Internal::NewTab) {
+        let mut t = self.tabs.remove(idx);
+        let view = t.view.take();
+        self.retire_view(id, view);
+        if remember && !t.private && t.internal != Some(Internal::NewTab) {
             self.closed.push(SessionTab {
                 url: t.session_url(),
                 title: t.title.clone(),
@@ -1638,8 +1783,9 @@ impl App {
         if self.active == id {
             self.active = 0;
             let vis = self.visible();
-            match vis.get(pos.unwrap_or(0).min(vis.len().saturating_sub(1))) {
-                Some(&g) => {
+            let preferred = vis.iter().copied().find(|&g| prefer != 0 && self.tabs[g].id == prefer);
+            match preferred.or_else(|| vis.get(pos.unwrap_or(0).min(vis.len().saturating_sub(1))).copied()) {
+                Some(g) => {
                     let next = self.tabs[g].id;
                     self.activate(next);
                 }
@@ -1649,6 +1795,41 @@ impl App {
         }
         self.ui_dirty = true;
         self.session_dirty = true;
+    }
+
+    /// Whether tab `id` (or the closed tab it was) has a download running.
+    fn downloading_in(&self, id: u32) -> bool {
+        self.downloads.iter().any(|d| d.state == 0 && d.tab == id)
+    }
+
+    /// A webview being thrown away (closed tab, deleted space, unused prerender).
+    /// With a download running it is kept, hidden and silent, until the download
+    /// ends: destroying it would leave the download stuck forever.
+    fn retire_view(&mut self, id: u32, view: Option<WebView>) {
+        let Some(v) = view else { return };
+        if self.downloading_in(id) {
+            let _ = v.set_visible(false);
+            tab::set_muted(&v, true);
+            let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
+            self.parked.push((id, v));
+        }
+    }
+
+    /// Parked webviews whose downloads are all over are let go.
+    fn release_parked(&mut self) {
+        if self.parked.is_empty() {
+            return;
+        }
+        let busy: std::collections::HashSet<u32> =
+            self.downloads.iter().filter(|d| d.state == 0).map(|d| d.tab).collect();
+        self.parked.retain(|(id, _)| busy.contains(id));
+    }
+
+    /// The prerendered launcher page is not needed (any more).
+    fn drop_spare(&mut self) {
+        if let Some(s) = self.spare.take() {
+            self.retire_view(s.tab.id, s.tab.view);
+        }
     }
 
     fn cycle(&mut self, delta: isize) {
@@ -1803,12 +1984,17 @@ impl App {
     }
 
     fn sleep_tab(&mut self, i: usize) {
+        // A download would die with the webview.
+        if self.downloading_in(self.tabs[i].id) {
+            return;
+        }
         let t = &mut self.tabs[i];
         if t.id != self.active && t.view.is_some() {
             t.view = None;
             t.replay.clear();
             t.loading = false;
             t.audio = false;
+            t.trimmed = false;
             self.ui_dirty = true;
         }
     }
@@ -2061,6 +2247,36 @@ impl App {
         self.ui_dirty = true;
     }
 
+    /// "Перевести «…»" from the page's context menu: the page shows a bubble by the
+    /// selection right away and the translation fills it (content.js, `tsel`).
+    fn translate_selection(&mut self, id: u32, text: &str, x: i32, y: i32) {
+        self.sel_seq += 1;
+        let rid = self.sel_seq;
+        let Some(view) = self.view_of(id) else { return };
+        tab::post_json(view, &json!({ "mb": "tsel", "id": rid, "x": x, "y": y }).to_string());
+        let to = Some(self.settings.translate_to.clone()).filter(|l| crate::translate::valid_lang(l)).unwrap_or_else(|| "ru".into());
+        let text: String = text.chars().take(5000).collect();
+        let p = self.proxy.clone();
+        std::thread::spawn(move || {
+            let mut to = to;
+            let mut res = crate::translate::translate_text(&text, &to);
+            // Already in the target language: English is the useful direction then
+            // (Russian when the target is English).
+            if res.as_ref().is_ok_and(|(_, from)| crate::translate::same_lang(from, &to)) {
+                let other = if crate::translate::same_lang(&to, "en") { "ru" } else { "en" };
+                if let Ok(r) = crate::translate::translate_text(&text, other) {
+                    res = Ok(r);
+                    to = other.into();
+                }
+            }
+            let msg = match res {
+                Ok((r, from)) => json!({ "mb": "tsel", "id": rid, "r": r, "from": from, "to": to }),
+                Err(e) => json!({ "mb": "tsel", "id": rid, "err": e }),
+            };
+            let _ = p.send_event(UserEvent::PageReply(id, msg.to_string()));
+        });
+    }
+
     fn open_history(&mut self) {
         let existing = self
             .tabs
@@ -2080,7 +2296,7 @@ impl App {
     fn internal_html(&self, k: Internal, private: bool) -> String {
         match k {
             Internal::NewTab => self.newtab_html(private),
-            Internal::History => pages::history(&self.history),
+            Internal::History => pages::history(&self.int_token),
             Internal::Bookmarks => {
                 let tiles = self
                     .bookmarks
@@ -2111,13 +2327,13 @@ impl App {
         }
     }
 
-    /// A message from the bookmarks / settings page. Gate: the tab shows one of those
+    /// A message from the bookmarks / settings / history page. Gate: the tab shows one of those
     /// pages right now, the message carries this run's random token (only the page's own
     /// HTML has it) and its document is not a web page (`src` is added by tab.rs).
     fn internal_message(&mut self, id: u32, v: &Value) {
         let Some(i) = self.idx(id) else { return };
         let kind = match self.tabs[i].internal {
-            Some(k @ (Internal::Bookmarks | Internal::Settings)) => k,
+            Some(k @ (Internal::Bookmarks | Internal::Settings | Internal::History)) => k,
             _ => return,
         };
         let from_web = v["src"].as_str().is_none_or(|s| s.to_ascii_lowercase().starts_with("http"));
@@ -2126,6 +2342,11 @@ impl App {
         }
         let a = v["a"].as_str().unwrap_or("");
         match (kind, a) {
+            (Internal::History, "history") => {
+                if let Some(view) = self.view_of(id) {
+                    tab::post_json(view, &pages::history_message(&self.history));
+                }
+            }
             (Internal::Bookmarks, a) if a.starts_with("bm_") => {
                 if internal::bookmark_op(&mut self.bookmarks, a, v) {
                     self.bookmarks.save();
@@ -2154,7 +2375,27 @@ impl App {
                 let _ = std::process::Command::new("explorer").arg(store::data_dir()).spawn();
             }
             (Internal::Settings, "open_bookmarks") => self.open_internal(Internal::Bookmarks),
+            (Internal::Settings, "update_check") => {
+                self.update_asker = id;
+                match &self.update_ready {
+                    Some(v) => {
+                        let v = v.clone();
+                        self.update_answer(&format!("Версия {v} уже скачана: перезапустите браузер (меню ⋮)"), false);
+                    }
+                    None => crate::update::check_now(&self.proxy),
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// The settings page that asked "Проверить сейчас" shows this as a toast.
+    fn update_answer(&self, text: &str, err: bool) {
+        let to = self.update_asker;
+        if self.idx(to).is_some_and(|i| self.tabs[i].internal == Some(Internal::Settings))
+            && let Some(view) = self.view_of(to)
+        {
+            tab::post_json(view, &json!({ "mb": "int", "upd": text, "err": err }).to_string());
         }
     }
 
@@ -2288,7 +2529,10 @@ impl App {
                     Some(i) => (Some(i), self.tabs[i].private),
                     None => (None, false),
                 };
-                self.open(&url, after, private, true);
+                let id = self.open(&url, after, private, true);
+                if let Some(i) = self.idx(id) {
+                    self.tabs[i].opener = opener;
+                }
             }
             UserEvent::External(arg) => {
                 if let Some(url) = omni::resolve(&arg, &self.settings) {
@@ -2322,45 +2566,70 @@ impl App {
                     g.create_ui(&self.env, UI_HTML, &self.proxy);
                 }
             }
-            UserEvent::DlStart { id, url, path, total, page, private } => {
+            UserEvent::DlStart { id, tab, url, path, total, page, private } => {
+                // A link opened in a new tab: the page it came from is the opener's.
+                let page = match self.idx(tab) {
+                    Some(i) if !page.starts_with("http") => {
+                        self.idx(self.tabs[i].opener).map(|j| self.tabs[j].url.clone()).unwrap_or(page)
+                    }
+                    _ => page,
+                };
                 self.downloads.insert(
                     0,
-                    DownloadItem { id, url, page, path, total, state: 0, time: store::now(), private, ..Default::default() },
+                    DownloadItem {
+                        id,
+                        tab,
+                        url,
+                        page,
+                        path,
+                        total,
+                        state: 0,
+                        time: store::now(),
+                        private,
+                        ..Default::default()
+                    },
                 );
+                self.dl_poll = Instant::now() + DL_POLL;
                 self.downloads_changed(false);
+                self.close_download_tab(tab);
             }
             UserEvent::Recover(ev) => self.recover_event(ev),
+            UserEvent::Update(outcome, manual) => {
+                use crate::update::Outcome;
+                match outcome {
+                    Outcome::Ready(v) => {
+                        if manual {
+                            self.update_answer(&format!("Версия {v} скачана: перезапустите браузер (меню ⋮)"), false);
+                        }
+                        self.update_ready = Some(v);
+                        self.ui_dirty = true;
+                    }
+                    Outcome::UpToDate if manual => {
+                        self.update_answer(&format!("Установлена последняя версия ({})", crate::update::CURRENT), false);
+                    }
+                    Outcome::UpToDate => {}
+                    Outcome::Failed(e) => {
+                        eprintln!("update: {e}");
+                        if manual {
+                            self.update_answer(&format!("Не удалось обновиться: {e}"), true);
+                        }
+                    }
+                }
+            }
             UserEvent::DlProgress(id, got, all) => {
-                if let Some(d) = self.downloads.iter_mut().find(|d| d.id == id) {
+                if let Some(d) = self.downloads.iter_mut().find(|d| d.id == id && d.state == 0) {
                     d.received = got;
                     d.total = all;
+                    self.downloads_changed(false);
                 }
-                self.downloads_changed(false);
             }
-            UserEvent::DlState(id, state, got, all, path) => {
-                let mut open_now = None;
-                if let Some(d) = self.downloads.iter_mut().find(|d| d.id == id) {
-                    d.state = state;
-                    d.received = got;
-                    d.total = all;
-                    d.paused = false;
-                    if !path.is_empty() {
-                        d.path = path;
-                    }
-                    let ext = file_ext(&d.path);
-                    if state == 1 && !ext.is_empty() && self.settings.auto_open.contains(&ext) {
-                        open_now = Some(d.path.clone());
-                    }
-                }
-                if state == 1 && self.panel != Some(Panel::Downloads) && !self.dl_watch {
-                    self.dl_unseen = true;
-                }
-                if let Some(p) = open_now {
-                    shell_open(&p);
-                }
-                self.downloads_changed(true);
+            UserEvent::DlState(id, state, got, all, path) => self.finish_download(id, state, got, all, path),
+            UserEvent::TranslateSelection(id, text, x, y) => self.translate_selection(id, &text, x, y),
+            UserEvent::IconCached => {
+                self.icon_cache.borrow_mut().arrived();
+                self.ui_dirty = true; // tabs may use the cached icon too
+                self.refresh_tablo();
             }
-            UserEvent::IconCached => self.refresh_tablo(),
             UserEvent::Extensions => {
                 if self.panel == Some(Panel::Extensions) {
                     let _ = self.ui.evaluate_script(&format!("mb.extData({})", ext::json(&self.exts)));
@@ -2714,6 +2983,7 @@ impl App {
                 if self.dl_watch {
                     self.dl_unseen = false;
                     self.ui_dirty = true;
+                    self.check_dl_files();
                     let _ = self.panel_ui().evaluate_script(&format!("mb.downloadsData({})", self.downloads_json()));
                 }
             }
@@ -2923,6 +3193,7 @@ impl App {
             None => json!({ "tabs": tabs, "active": 0, "url": "" }),
         };
         state["max"] = json!(self.maximized);
+        state["update"] = json!(self.update_ready);
         let (running, got, all) = self.downloads.iter().filter(|d| d.state == 0).fold((0, 0i64, 0i64), |(n, g, a), d| {
             (n + 1, g + d.received, a + d.total.max(0))
         });
@@ -2946,6 +3217,10 @@ impl App {
         self.adblock_check(false);
         // Default extensions (VOT): installed once, then kept up to date.
         crate::defext::maybe_check(&self.proxy);
+        // The browser itself, from its GitHub releases.
+        if self.update_ready.is_none() {
+            crate::update::maybe_check(&self.proxy, self.settings.auto_update);
+        }
         if self.ab_res_view.as_ref().is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(120)) {
             self.ab_res_view = None; // the CDN never answered; next update tries again
         }
@@ -2956,6 +3231,18 @@ impl App {
                 if t.view.is_some() && !t.pinned && !t.private && !t.audio && t.last_active.elapsed() > limit {
                     self.sleep_tab(i);
                 }
+            }
+        }
+        // Pages hidden for a while give memory back (WebView2's low-memory mode).
+        let active = self.active;
+        for t in &mut self.tabs {
+            if t.id != active
+                && !t.trimmed
+                && t.last_active.elapsed() > TRIM_AFTER
+                && let Some(v) = &t.view
+            {
+                let _ = v.set_memory_usage_level(MemoryUsageLevel::Low);
+                t.trimmed = true;
             }
         }
         if self.session_dirty {
@@ -3047,9 +3334,10 @@ impl App {
         let can_translate = self.active_idx().is_some_and(|i| host_of(&self.tabs[i].url).is_some() && self.tabs[i].internal.is_none());
         let translating = self.active_idx().is_some_and(|i| !self.tabs[i].shared.translate.borrow().is_empty());
         let ab_status = self.adblock_status();
+        let update_label = self.update_ready.as_ref().map(|v| format!("Перезапустить и обновить до {v}"));
         // Only what people reach for. Print / DevTools live on Ctrl+P / F12, tab sleep
         // is always on, blocking is switched per site with the shield.
-        let items = [
+        let mut items = vec![
             MenuItem::Item(1, "Новая вкладка\tCtrl+T"),
             MenuItem::Item(2, "Новая приватная вкладка\tCtrl+Shift+N"),
             MenuItem::Item(3, "Открыть закрытую вкладку\tCtrl+Shift+T"),
@@ -3091,7 +3379,11 @@ impl App {
             MenuItem::Item(50, "Установить и сделать браузером по умолчанию"),
             MenuItem::Item(51, "Удалить установку и регистрацию браузера"),
         ];
+        if let Some(label) = &update_label {
+            items.splice(0..0, [MenuItem::Item(70, label.as_str()), MenuItem::Sep]);
+        }
         match self.popup(&items, Some(at), true) {
+            70 => self.restart_for_update(),
             1 => self.exec(Cmd::NewTab),
             2 => self.exec(Cmd::NewPrivate),
             3 => self.exec(Cmd::Reopen),
@@ -3162,7 +3454,7 @@ impl App {
     fn tab_menu(&mut self, id: u32) {
         let Some(i) = self.idx(id) else { return };
         let t = &self.tabs[i];
-        let can_sleep = t.id != self.active && t.view.is_some();
+        let can_sleep = t.id != self.active && t.view.is_some() && !self.downloading_in(t.id);
         let (url, private, pinned, muted) = (t.session_url(), t.private, t.pinned, t.muted);
         let others: Vec<(u32, String)> =
             self.spaces.iter().filter(|s| s.id != self.space).map(|s| (s.id, s.name.clone())).collect();

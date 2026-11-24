@@ -73,16 +73,21 @@ pub unsafe fn hook(view: &WebView, id: u32, proxy: &Proxy) {
     }
 }
 
-/// Start of a restarted process: give the dead engine a moment to release the profile.
+/// Set on the process started by "Перезапустить и обновить".
+const UPDATED_ENV: &str = "MBROWSER_UPDATED";
+
+/// Start of a restarted process: give the dead engine (or the previous process)
+/// a moment to release the profile.
 pub fn on_start() {
-    if std::env::var_os(ENV).is_some() {
+    if restarted() {
         std::thread::sleep(Duration::from_millis(900));
     }
 }
 
-/// Whether this process is a crash-recovery restart (the session must be restored).
+/// Whether this process is a crash-recovery or update restart (the session must
+/// be restored).
 pub fn restarted() -> bool {
-    std::env::var_os(ENV).is_some()
+    std::env::var_os(ENV).is_some() || std::env::var_os(UPDATED_ENV).is_some()
 }
 
 fn now_secs() -> u64 {
@@ -169,7 +174,7 @@ impl App {
     fn tab_crashed(&mut self, id: u32) {
         let Some(i) = self.idx(id) else {
             if self.spare.as_ref().is_some_and(|s| s.tab.id == id) {
-                self.spare = None; // the hidden prerender is not worth recovering
+                self.drop_spare(); // the hidden prerender is not worth recovering
             }
             return;
         };
@@ -235,7 +240,9 @@ impl App {
 
     /// Throw the active tab's webview away and create a new one (reloads the page).
     fn rebuild_active(&mut self, i: usize) {
-        self.tabs[i].view = None;
+        let (id, old) = (self.tabs[i].id, self.tabs[i].view.take());
+        self.retire_view(id, old); // a download it started keeps going
+        self.tabs[i].trimmed = false;
         self.ensure_view(i, true);
         let rect = self.content_rect();
         if let Some(v) = &self.tabs[i].view {
@@ -289,6 +296,22 @@ impl App {
             }
         }
         std::process::exit(if spawned { 0 } else { 1 });
+    }
+
+    /// "Перезапустить и обновить": the new exe is already in place; save the
+    /// session, start it (it restores the tabs) and leave.
+    pub(super) fn restart_for_update(&mut self) {
+        let Some((_, exe)) = crate::update::staged() else { return };
+        self.shutdown();
+        match Command::new(&exe).env(UPDATED_ENV, "1").spawn() {
+            Ok(_) => std::process::exit(0),
+            Err(e) => {
+                let text = format!("Не удалось запустить новую версию:\n{e}\n\nОна запустится сама при следующем открытии браузера.");
+                unsafe {
+                    MessageBoxW(None, &HSTRING::from(text), &HSTRING::from(crate::APP_NAME), MB_OK | MB_ICONERROR);
+                }
+            }
+        }
     }
 }
 
